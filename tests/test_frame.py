@@ -1,5 +1,6 @@
 # pylint: disable=C0104
 
+import dis
 import inspect
 from typing import Optional
 from pyckpt import analyzer
@@ -64,8 +65,18 @@ def test_frame_multiple_evaluation():
 
         return frame_, "hello"
 
+    dis.dis(capture_frame)
+
     frame_, _ = capture_frame()
 
-    _, ret = frame_.evaluate()
+    ret_frame, ret = frame_.evaluate(frame_)
 
     assert ret == "hello", "invalid return value"
+    assert ret_frame is frame_, "invalid resumed return value"
+
+    try:
+        ret_frame: SavedFrame
+        ret_frame.evaluate(frame_)
+        assert False, "allow multiple evaluation on one captured frame"
+    except RuntimeError:
+        pass

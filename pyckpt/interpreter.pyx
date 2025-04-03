@@ -96,9 +96,9 @@ def eval_frame_at_lasti(
     func_obj: FunctionType,
     nlocals: List[Any],
     stack: List[Any],
-    prev_instr_offset,
     is_leaf: bool,
-    ret_value: Any,
+    ret_value: Any = None,
+    prev_instr_offset = -1,
 ):
     cdef PyFunctionObject* func = <PyFunctionObject*>func_obj
     cdef PyThreadState* state = _PyThreadState_GET()

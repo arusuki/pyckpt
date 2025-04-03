@@ -17,6 +17,7 @@ def test_eval_no_args():
         foo,
         [],
         [],
+        True,
     )
 
 
@@ -29,6 +30,7 @@ def test_eval_one_arg():
         foo,
         ["world"],
         [],
+        True,
     )
 
 
@@ -41,6 +43,7 @@ def test_return_add():
         add,
         [1, 2],
         [],
+        True,
     )
 
     assert isinstance(result, int) and result == 3, "invalid result"

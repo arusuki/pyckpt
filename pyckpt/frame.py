@@ -39,13 +39,19 @@ class SavedFrame:
         self.prev_instr_offset = prev_instr_offset
         self.is_leaf = is_leaf
 
-    def evaluate(self):
+    def evaluate(self, ret_val=None):
 
         if self._evaluated:
             raise RuntimeError("evaluate frame that is already evaluated.")
 
         ret = interpreter.eval_frame_at_lasti(
-            self.func, self.nlocals, self.stack, self.prev_instr_offset)
+            self.func,
+            self.nlocals,
+            self.stack,
+            self.is_leaf,
+            ret_val,
+            self.prev_instr_offset
+        )
 
         # remove local variables
         del self.nlocals
