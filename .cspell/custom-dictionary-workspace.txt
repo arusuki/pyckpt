@@ -1,0 +1,24 @@
+# Custom Dictionary Words
+Alpa
+cdef
+CFLAGS
+cimport
+CODEUNIT
+ctypedef
+cythonize
+lasti
+libc
+localsplus
+malloc
+Mellanox
+nlocals
+nlocalsplus
+opmap
+pyckpt
+pycore
+stacksize
+stacksz
+stacktop
+stdlib
+throwflag
+tstate
