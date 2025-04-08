@@ -3,6 +3,8 @@
 import dis
 import inspect
 from typing import Optional
+
+import dill
 from pyckpt import analyzer
 import pyckpt.frame
 
@@ -80,3 +82,24 @@ def test_frame_multiple_evaluation():
         assert False, "allow multiple evaluation on one captured frame"
     except RuntimeError:
         pass
+
+
+def test_save_frame():
+    def capture_frame():
+
+        frame_ = SavedFrame.snapshot_from_frame(
+            inspect.currentframe(), False, analyzer.analyze_stack_top)
+
+        return frame_, "hello"
+
+    frame, ret1 = capture_frame()
+    frame.registry = {}
+
+    frame_s = dill.dumps(frame)
+
+    new_frame: SavedFrame
+    new_frame = dill.loads(frame_s)
+
+    _, ret2 = new_frame.evaluate(frame)
+
+    assert ret1 == ret2
