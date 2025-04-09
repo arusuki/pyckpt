@@ -1,105 +1,94 @@
-from dataclasses import dataclass
 import inspect
+from dataclasses import dataclass
 from types import FrameType, FunctionType
-from typing import Any, Callable, Dict, List, Type
-from pyckpt import interpreter
-from pyckpt.analyzer import Analyzer
-from pyckpt import objects
-from pyckpt.objects import HookType
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import dill
+
+from pyckpt import interpreter, objects
+from pyckpt.interpreter import ExceptionStates
+
+Analyzer = Callable[[FunctionType, int, bool], int]
 
 
-class NullObjectType:
-    pass
-
-
-NullObject = NullObjectType()
-
-
-@dataclass
-class FrameStates:
-    is_leaf: bool
-    func: Callable
-    stack: List[Any]
-    prev_instr_offset: int
-    nlocals: List[Any]
-
-
-class SavedFrame:
-
-    @staticmethod
-    def snapshot_from_frame(
-        frame: FrameType,
-        is_leaf: bool,
-        stack_analyzer: Analyzer,
-    ):
-        captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
-        return SavedFrame(**captured)
-
+class LiveFrame:
     def __init__(
         self,
+        *,
         func: FunctionType,
-        nlocals: List[Any],
-        stack: List[Any],
         prev_instr_offset: int,
         is_leaf: bool,
-        registry: Dict[Type, HookType] = None,
+        nlocals: List[Any],
+        stack: List[Any],
     ):
         self._evaluated = False
-        self.registry = registry
+        self.is_leaf = is_leaf
+        self.func = func
+        self.stack = stack
+        self.nlocals = nlocals
+        self.prev_instr_offset = prev_instr_offset
 
-        self.states = FrameStates(
-            is_leaf=is_leaf,
-            func=func,
-            stack=stack,
-            nlocals=nlocals,
-            prev_instr_offset=prev_instr_offset,
-        )
-
-    def __getattr__(self, name):
-        return getattr(self.states, name)
-
-    def __getstate__(self):
+    def evaluate(
+        self, ret_val=None, exc_states: Optional[ExceptionStates] = None
+    ) -> Tuple[Any, Optional[ExceptionStates]]:
+        ret = None
         if self._evaluated:
             raise RuntimeError("evaluate frame that is already evaluated.")
-
-        if self.registry is None:
-            raise RuntimeError(
-                "Saved frame with None registry is not serializable")
-        states = self.states.__dict__.copy()
-        for attr in ('stack', 'nlocals'):
-            states[attr] = objects.stub_objects(
-                self.registry, getattr(self.states, attr))
-            return states
-
-    def __setstate__(self, original_states: Dict):
-        states = original_states.copy()
-        for attr in ('stack', 'nlocals'):
-            states[attr] = objects.get_real_objects(states[attr])
-        self.states = object.__new__(FrameStates)
-        self.states.__dict__.update(states)
-        self._evaluated = False
-        self.registry = None
-
-    def evaluate(self, ret_val=None):
-        if self._evaluated:
-            raise RuntimeError("evaluate frame that is already evaluated.")
-
         ret = interpreter.eval_frame_at_lasti(
             self.func,
             self.nlocals,
             self.stack,
             self.is_leaf,
             ret_val,
-            self.prev_instr_offset
+            self.prev_instr_offset,
+            exc_states,
+        )
+        # remove local variables
+        del self.nlocals
+        del self.stack
+        self._evaluated = True
+        return ret
+
+
+@dataclass(frozen=True)
+class FrameCocoon:
+    is_leaf: bool
+    func: Callable
+    stack: bytes
+    nlocals: bytes
+    prev_instr_offset: int
+
+    @staticmethod
+    def from_frame(
+        frame: FrameType,
+        is_leaf: bool,
+        stack_analyzer: Analyzer,
+        stub_registry: Dict,
+        contexts: Dict,
+    ):
+        captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
+        nlocals = objects.stub_objects(stub_registry, captured["nlocals"], contexts)
+        stack = objects.stub_objects(stub_registry, captured["stack"], contexts)
+        captured["nlocals"] = nlocals
+        captured["stack"] = stack
+        if captured["generator"] is not None:
+            raise NotImplementedError("snapshot generator is not implemented")
+        del captured["generator"]
+        return FrameCocoon(**captured)
+
+    def spawn(self, contexts: Dict) -> LiveFrame:
+        nlocals = objects.get_real_objects(self.nlocals, contexts)
+        stack = objects.get_real_objects(self.stack, contexts)
+        return LiveFrame(
+            func=self.func,
+            is_leaf=self.is_leaf,
+            stack=stack,
+            nlocals=nlocals,
+            prev_instr_offset=self.prev_instr_offset,
         )
 
-        # remove local variables
-        del self.states.nlocals
-        del self.states.stack
-
-        self._evaluated = True
-
-        return ret
+    def clone(self) -> "FrameCocoon":
+        return dill.copy(self)
 
 
 def capture(backtrace_level=0):

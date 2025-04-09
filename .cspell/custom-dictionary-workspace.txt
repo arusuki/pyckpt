@@ -1,11 +1,16 @@
 # Custom Dictionary Words
 Alpa
 cdef
+CDLL
 CFLAGS
 cimport
 CODEUNIT
 ctypedef
+ctypes
+cython
 cythonize
+dylib
+IKOT
 lasti
 libc
 localsplus
@@ -14,11 +19,18 @@ Mellanox
 nlocals
 nlocalsplus
 opmap
+pthread
 pyckpt
 pycore
+RERAISE
+setuptools
+SIGRTMAX
+SIGRTMIN
+stackdepth
 stacksize
 stacksz
 stacktop
 stdlib
 throwflag
 tstate
+VARARGS
