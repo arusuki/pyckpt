@@ -7,8 +7,8 @@ from typing import Generator
 import pytest
 from bytecode import Bytecode, Instr
 
+from pyckpt.interpreter import NullObject
 from pyckpt.interpreter import frame as _frame
-from pyckpt.objects import NullObject
 
 
 def test_eval_no_args():
@@ -97,10 +97,9 @@ def test_snapshot_stack():
     foo()
 
 
-def test_snapshot_generator():
+def test_snapshot_generator_from_frame():
     def foo():
         frame = inspect.currentframe()
-        # frame.snapshot(frame, True, FixedStackAnalyzer(4))["stack"]
         yield frame
 
     gen = foo()
@@ -108,9 +107,8 @@ def test_snapshot_generator():
 
     frame = next(gen)
     assert isinstance(frame, FrameType)
-    g = _frame._get_generator(frame)
+    g = _frame.get_generator(frame)
     assert isinstance(g, Generator)
-
     assert gen is g
 
 

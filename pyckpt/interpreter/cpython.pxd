@@ -11,12 +11,13 @@ cdef extern from "Python.h":
     ctypedef struct PyCodeObject:
         int co_stacksize
         int co_nlocalsplus
+        int co_flags
         char[1] co_code_adaptive
 
     ctypedef int _Py_CODEUNIT
 
     ctypedef struct PyFunctionObject:
-        PyCodeObject *func_code
+        PyObject *func_code
         PyObject *func_globals
         PyObject *func_name
         PyObject *func_qualname
@@ -25,6 +26,8 @@ cdef extern from "Python.h":
         pass
 
     cdef extern PyObject* _PyEval_EvalFrameDefault(PyThreadState *tstate, void *frame, int throwflag)
+
+    cdef PyObject* Py_None
 
 
 cdef extern from *:
@@ -70,6 +73,8 @@ cdef extern from *:
         FRAME_OWNED_BY_FRAME_OBJECT_311 = 2
     };
 
+    static inline int get_frame_owned_by_generator_311() {return FRAME_OWNED_BY_GENERATOR_311; }
+
     static inline void
     PyFrame_InitializeSpecials_311(
         PyInterpreterFrame_311 *frame, PyFunctionObject *func,
@@ -86,14 +91,27 @@ cdef extern from *:
         frame->is_entry = false;
         frame->owner = FRAME_OWNED_BY_THREAD_311;
     }
+
+    typedef enum {
+        FRAME_CREATED_311   = -2,
+        FRAME_SUSPENDED_311 = -1,
+        FRAME_EXECUTING_311 =  0,
+        FRAME_COMPLETED_311 =  1,
+        FRAME_CLEARED_311   =  4
+    } PyFrameState_311;
+
+    static inline int get_frame_cleared_311() { return FRAME_CLEARED_311; }
+    static inline int get_frame_created_311() { return FRAME_CREATED_311; }
+    static inline int get_frame_suspended_311() { return FRAME_SUSPENDED_311; }
     """
 
     # https://github.com/python/cpython/blob/3.11/Include/internal/pycore_frame.h
     ctypedef struct PyInterpreterFrame_311:
         PyFunctionObject *f_func
-        _Py_CODEUNIT* prev_instr;
-        int stacktop;
-        PyObject* localsplus[1];
+        _Py_CODEUNIT* prev_instr
+        int stacktop
+        int owner
+        PyObject* localsplus[1]
 
     cdef PyInterpreterFrame_311* GET_FRAME_311(PyFrameObject* obj)
     cdef void PyFrame_InitializeSpecials_311(PyInterpreterFrame_311 *frame, PyFunctionObject *func, PyObject *locals, int nlocalsplus)
@@ -103,6 +121,11 @@ cdef extern from *:
     int FRAME_EXECUTING
     int FRAME_COMPLETED
     int FRAME_CLEARED
+
+    cdef inline int get_frame_owned_by_generator_311()
+    cdef inline int get_frame_cleared_311()
+    cdef inline int get_frame_created_311()
+    cdef inline int get_frame_suspended_311()
 
 cdef extern from "pyerrors.h":
     cdef PyObject* _PyErr_GetHandledException(PyThreadState* tstate)
