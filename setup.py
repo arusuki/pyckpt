@@ -1,4 +1,5 @@
 import sys
+from tkinter import W
 from typing import List
 
 from Cython.Build import cythonize
@@ -22,7 +23,7 @@ def platform_module() -> List[str]:
 def interpreter_module() -> List[Extension]:
     version = f"{sys.version_info.major}_{sys.version_info.minor}"
     if version == "3_11":
-        return ["pyckpt/interpreter/frame.pyx"]
+        return ["pyckpt/interpreter/frame.pyx", "pyckpt/interpreter/generator.pyx"]
     else:
         raise RuntimeError(
             f"unsupported CPython version:\
@@ -40,7 +41,9 @@ setup(
     version="0.0.0",
     ext_modules=cythonize(
         cython_modules,
-        compiler_directives={"language_level": "3"},
+        compiler_directives={
+            "language_level": "3",
+        },
     ),
     packages=["pyckpt"],
     requires=["Cython"],

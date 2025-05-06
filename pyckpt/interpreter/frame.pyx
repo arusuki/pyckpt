@@ -1,7 +1,10 @@
+# cython: embedsignature=True, embedsignature.format=python
+
 from types import CodeType, FrameType, FunctionType, TracebackType
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
 from libc.stdlib cimport malloc, free
 from cpython.ref cimport PyObject, Py_INCREF
+from cpython.pycapsule cimport PyCapsule_New, PyCapsule_GetPointer
 from threading import Thread
 from itertools import chain
 from pyckpt.interpreter.cpython cimport *
@@ -15,13 +18,22 @@ from pyckpt.interpreter.cpython cimport (
 import dis
 import inspect
 import logging
-import pyckpt.objects
 import sys
+
+class NullObjectType: ...
+NullObject = NullObjectType()
+
+cdef extern from "Python.h":
+    int CO_GENERATOR
+    int CO_COROUTINE
+    int CO_ASYNC_GENERATOR
+
 
 if (3, 11) <= sys.version_info <= (3, 12):
     from pyckpt.interpreter.cpython cimport PyInterpreterFrame_311 as _PyInterpreterFrame
     from pyckpt.interpreter.cpython cimport GET_FRAME_311 as GET_FRAME
     from pyckpt.interpreter.cpython cimport PyFrame_InitializeSpecials_311 as _PyFrame_InitializeSpecials
+    from pyckpt.interpreter.cpython cimport get_frame_owned_by_generator_311 as get_frame_owned_by_generator
 else:
     raise SystemError(f"unsupported python version: {sys.version_info}")
 
@@ -73,19 +85,19 @@ cdef PyThreadState* get_thread_by_id(unsigned long thread_id):
     return _get_thread_state_by_id(thread_id)
 
 
-cdef _init_locals_and_stack(
-    _PyInterpreterFrame* frame,
-    nlocals: List[Any],
-    stack: List[Any],
-    co_nlocalsplus: int,
-    co_stacksize: int,
+cdef void init_locals_and_stack(
+    void* frame_,
+    list nlocals,
+    list stack,
+    int co_nlocalsplus,
 ):
+    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> frame_
     # n local vars + 1 sentinel(NULL)
     for i in range(co_nlocalsplus + 1):
         frame.localsplus[i] = NULL
     assert len(nlocals) <= co_nlocalsplus
     for i, py_obj in enumerate(nlocals):
-        if py_obj is not pyckpt.objects.NullObject:
+        if py_obj is not NullObject:
             Py_INCREF(py_obj)
             obj = <PyObject*>py_obj
             frame.localsplus[i] = obj
@@ -109,28 +121,6 @@ def _fetch_exception() -> ExceptionStates:
 def restore_exception(states: ExceptionStates):
     PyErr_Restore(<PyObject*> states[0], <PyObject*> states[1], <PyObject*> states[2])
 
-cdef PyObject* _eval_frame_at_lasti(
-    PyFunctionObject *func,
-    _PyInterpreterFrame* frame,
-    PyObject* nlocals,
-    PyObject* stack,
-    int is_leaf,
-    PyObject* ret_value,
-    int prev_instr_offset,
-    int do_exc,
-):
-    cdef PyThreadState* state = PyThreadState_GET()
-    cdef PyCodeObject * code = func.func_code;
-
-    _PyFrame_InitializeSpecials(
-        frame,
-        <PyFunctionObject*> func,
-        func.func_globals,
-        code.co_nlocalsplus
-    )
-    frame.prev_instr = &(<_Py_CODEUNIT*>(code.co_code_adaptive))[prev_instr_offset]
-    _init_locals_and_stack(frame, <object> nlocals, <object> stack, code.co_nlocalsplus, code.co_stacksize)
-    return _PyEval_EvalFrameDefault(state, frame, do_exc)
 
 def eval_frame_at_lasti(
     func_obj: FunctionType,
@@ -143,7 +133,7 @@ def eval_frame_at_lasti(
 ) -> Tuple[Any, ExceptionStates]:
     cdef PyFunctionObject* func = <PyFunctionObject*>func_obj
     cdef PyThreadState* state = PyThreadState_GET()
-    cdef PyCodeObject * code = func.func_code;
+    cdef PyCodeObject * code = <PyCodeObject*> func.func_code;
     cdef size_t size = code.co_nlocalsplus + code.co_stacksize + frame_specials_size();
     cdef _PyInterpreterFrame *frame = <_PyInterpreterFrame*> malloc(sizeof(PyObject*) * size)
 
@@ -156,7 +146,7 @@ def eval_frame_at_lasti(
         code.co_nlocalsplus
     )
     frame.prev_instr = &(<_Py_CODEUNIT*>(code.co_code_adaptive))[prev_instr_offset]
-    _init_locals_and_stack(frame, nlocals, stack, code.co_nlocalsplus, code.co_stacksize)
+    init_locals_and_stack(frame, nlocals, stack, code.co_nlocalsplus)
     do_exc = 0
     if exc_states is not None:
         if PyErr_Occurred() != NULL:
@@ -185,7 +175,7 @@ def _offset_without_cache(
 
 
 # FIXME: these version-dependent functions should be placed separately.
-CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX']
+CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE']
 CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
 def is_call_instr(opcode: int):
     return opcode in CALL_CODES
@@ -207,30 +197,32 @@ def _fix_non_leaf_call(code: CodeType, code_array: List[dis.Instruction], instr_
         f"Invalid op {code_array[instr_offset]} at offset: {instr_offset}"
     return instr_offset
 
-def _check_generator(frame: FrameType):
-    # if frame_obj.f_code.co_flags & (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
-    #     # TODO: add support for generator frames
-    #     raise NotImplementedError(f"snapshot generator frame object {frame_obj} is not implemented")
-    mask = (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR)
-    flag = frame.f_code.co_flags & mask
+cdef int _check_generator(_PyInterpreterFrame* frame):
+    cdef PyCodeObject* code = <PyCodeObject*> frame.f_func.func_code
+    cdef int co_flags = code.co_flags
+    cdef int mask = (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)
+    cdef int flag = co_flags & mask
     if flag == 0:
-        return False
+        return 0
     if flag == inspect.CO_GENERATOR:
-        return True
+        assert frame.owner == get_frame_owned_by_generator()
+        return 1
     else:
-        raise ValueError(
-            f"snapshot frame {frame} of type (coroutine | async_generator) is not supported"
-        )
+        return -1
 
-def _get_generator(frame: FrameType):
-    cdef PyFrameObject* frame_obj = <PyFrameObject*> frame
-    gen = <object> generator_of(GET_FRAME(frame_obj))
+def get_generator(frame: FrameType):
+    cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*> frame)
+    if _check_generator(_frame) <= 0:
+        raise ValueError(f"frame not supported: {frame}")
+    gen = <object> generator_of(_frame)
     Py_INCREF(gen)
     return <object> gen
 
-
-def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> Dict:
-    cdef _PyInterpreterFrame* frame = GET_FRAME(<PyFrameObject*>frame_obj)
+PyCapsule = Any
+cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
+    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> frame_ptr
+    if frame == NULL:
+        raise RuntimeError("fail: PyCapsule_GetPointer")
     cdef PyFunctionObject* func = <PyFunctionObject*>(frame.f_func)
     cdef PyCodeObject* code = <PyCodeObject*> func.func_code
     cdef int nlocalsplus = code.co_nlocalsplus
@@ -246,28 +238,29 @@ def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> Dict:
             code_array,
             instr_offset
         )
-    is_generator = _check_generator(frame_obj)
+    is_generator = _check_generator(frame)
     stacksize = analyzer(
         <object> func,
         _offset_without_cache(code_array, fixed_instr_offset),
-        is_generator,
+        is_generator > 0,
     )
     # Ignore the 'return value' of the ongoing 'CALL' instruction.
     if not is_leaf:
         stacksize -= 1
     generator: Optional[Generator] = None
-    if is_generator:
-        generator = _get_generator(frame_obj)
+    if is_generator > 0:
+        generator = <object> generator_of(frame)
+        Py_INCREF(generator)
     captured = {
         "func": <object> func,
         "nlocals": [
             <object> frame.localsplus[i]
-                if frame.localsplus[i] != NULL else pyckpt.objects.NullObject
+                if frame.localsplus[i] != NULL else NullObject
             for i in range(nlocalsplus)
         ],
         "stack": [
             <object> frame.localsplus[nlocalsplus + i]
-                if frame.localsplus[nlocalsplus + i] != NULL else pyckpt.objects.NullObject
+                if frame.localsplus[nlocalsplus + i] != NULL else NullObject
             for i in range(stacksize)
         ],
         "prev_instr_offset": instr_offset,
@@ -275,9 +268,15 @@ def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> Dict:
         "generator": generator
     }
     for obj in chain(captured["nlocals"], captured["stack"]):
-        if obj is not pyckpt.objects.NullObject:
+        if obj is not NullObject:
             Py_INCREF(obj)
+    Py_INCREF(<object> func)
+    Py_INCREF(generator)
     return captured
+
+def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> Dict:
+    cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*>frame_obj)
+    return _snapshot_frame(_frame, <int> is_leaf, analyzer)
 
 
 def save_thread_state(thread: Thread):
