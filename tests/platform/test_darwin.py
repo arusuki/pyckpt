@@ -7,7 +7,7 @@ import pytest
 from pyckpt import platform
 
 if sys.platform != "darwin":
-    pytest.skip("These tests only run on darwin platform")
+    pytest.skip("These tests only run on darwin platform", allow_module_level=True)
 
 
 def test_native_handle():

@@ -16,6 +16,7 @@ def platform_module() -> List[str]:
         return [
             Extension("pyckpt.platform", ["pyckpt/platform/darwin.pyx"]),
         ]
+    return []
 
 
 def interpreter_module() -> List[Extension]:
