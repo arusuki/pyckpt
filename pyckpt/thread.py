@@ -5,7 +5,7 @@ from threading import Thread
 from typing import Callable, Dict, List, Optional, Set, Type
 
 import dill
-from attr import dataclass
+from dataclasses import dataclass
 
 from pyckpt import interpreter, platform
 from pyckpt.analyzer import analyze_stack_top
