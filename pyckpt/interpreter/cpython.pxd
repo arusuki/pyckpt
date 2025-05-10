@@ -103,6 +103,7 @@ cdef extern from *:
     static inline int get_frame_cleared_311() { return FRAME_CLEARED_311; }
     static inline int get_frame_created_311() { return FRAME_CREATED_311; }
     static inline int get_frame_suspended_311() { return FRAME_SUSPENDED_311; }
+    static inline int get_frame_executing_311() { return FRAME_EXECUTING_311; }
     """
 
     # https://github.com/python/cpython/blob/3.11/Include/internal/pycore_frame.h
@@ -112,6 +113,8 @@ cdef extern from *:
         int stacktop
         int owner
         PyObject* localsplus[1]
+        PyInterpreterFrame_311* previous
+        PyFrameObject* frame_obj
 
     cdef PyInterpreterFrame_311* GET_FRAME_311(PyFrameObject* obj)
     cdef void PyFrame_InitializeSpecials_311(PyInterpreterFrame_311 *frame, PyFunctionObject *func, PyObject *locals, int nlocalsplus)
@@ -126,6 +129,7 @@ cdef extern from *:
     cdef inline int get_frame_cleared_311()
     cdef inline int get_frame_created_311()
     cdef inline int get_frame_suspended_311()
+    cdef inline int get_frame_executing_311()
 
 cdef extern from "pyerrors.h":
     cdef PyObject* _PyErr_GetHandledException(PyThreadState* tstate)
@@ -142,10 +146,15 @@ cdef extern from "pystate.h":
     ctypedef struct PyInterpreterState:
         pass
 
+    ctypedef struct _PyCFrame:
+        void* current_frame
+
     ctypedef struct PyThreadState:
+        _PyCFrame* cframe
         PyObject *curexc_type
         PyInterpreterState* interp
         unsigned long thread_id
+        void *exc_info
 
     ctypedef struct PyGILState_STATE:
         pass

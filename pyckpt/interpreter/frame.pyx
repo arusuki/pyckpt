@@ -4,7 +4,6 @@ from types import CodeType, FrameType, FunctionType, TracebackType
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
 from libc.stdlib cimport malloc, free
 from cpython.ref cimport PyObject, Py_INCREF
-from cpython.pycapsule cimport PyCapsule_New, PyCapsule_GetPointer
 from threading import Thread
 from itertools import chain
 from pyckpt.interpreter.cpython cimport *
@@ -130,7 +129,7 @@ def eval_frame_at_lasti(
     ret_value: Any = None,
     prev_instr_offset = -1,
     exc_states: Optional[ExceptionStates] = None,
-) -> Tuple[Any, ExceptionStates]:
+) -> Tuple[Any, Optional[ExceptionStates]]:
     cdef PyFunctionObject* func = <PyFunctionObject*>func_obj
     cdef PyThreadState* state = PyThreadState_GET()
     cdef PyCodeObject * code = <PyCodeObject*> func.func_code;
@@ -159,7 +158,6 @@ def eval_frame_at_lasti(
     cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
     if result == NULL:
         exc_states = _fetch_exception()
-        PyErr_Clear()
         return None, exc_states
     free(frame)
     return <object> result, None

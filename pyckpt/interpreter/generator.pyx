@@ -1,11 +1,17 @@
 # cython: embedsignature=True, embedsignature.format=python
+import inspect
 import sys
+from types import TracebackType
 
-from cpython.ref cimport Py_INCREF, PyTypeObject
+from cpython.ref cimport Py_INCREF, Py_DECREF, PyTypeObject
 from typing import Dict, Generator, Type
 from pyckpt.interpreter.cpython cimport *
-from pyckpt.interpreter.cpython cimport _Py_CODEUNIT
+from pyckpt.interpreter.cpython cimport (
+    _Py_CODEUNIT,
+    _PyEval_EvalFrameDefault,
+)
 from pyckpt.interpreter.frame cimport init_locals_and_stack, _snapshot_frame
+from pyckpt.interpreter.frame import NullObject
 
 
 if (3, 11) <= sys.version_info <= (3, 12):
@@ -14,6 +20,7 @@ if (3, 11) <= sys.version_info <= (3, 12):
     from pyckpt.interpreter.cpython cimport get_frame_cleared_311 as get_frame_cleared
     from pyckpt.interpreter.cpython cimport get_frame_created_311 as get_frame_created
     from pyckpt.interpreter.cpython cimport get_frame_suspended_311 as get_frame_suspended
+    from pyckpt.interpreter.cpython cimport get_frame_executing_311 as get_frame_executing
     from pyckpt.interpreter.cpython cimport get_frame_owned_by_generator_311 as get_frame_owned_by_generator
 else:
     raise SystemError(f"unsupported python version: {sys.version_info}")
@@ -21,7 +28,11 @@ else:
 cdef extern from "Python.h":
     """
     # define New_Gen(slots) PyObject_GC_NewVar(PyGenObject, &PyGen_Type, slots)
+
+    # define check_exception_StopIteration() (PyErr_ExceptionMatches(PyExc_StopIteration))
     """
+
+    cdef int check_exception_StopIteration()
 
     ctypedef struct _PyErr_StackItem:
         PyObject* exc_value
@@ -71,14 +82,17 @@ cdef inline int no_exception(PyObject* exc_value):
 
 def snapshot_generator(generator: Generator):
     cdef PyGenObject* gen = <PyGenObject*> generator
-    # if gen.gi_exc_state.exc_value != NULL:
-    if not no_exception(gen.gi_exc_state.exc_value):
-        raise NotImplementedError("exception stack for generators")
 
     Py_INCREF(<object> gen.gi_code)
     Py_INCREF(<object> gen.gi_name)
     Py_INCREF(<object> gen.gi_qualname)
     Py_INCREF(<object> gen.gi_frame_state)
+
+    cdef PyObject* exc_value = gen.gi_exc_state.exc_value
+    exception = NullObject
+    if exc_value:
+        exception = <object> exc_value
+        Py_INCREF(exception)
 
     return {
         "gi_code"        : <object> gen.gi_code,
@@ -86,6 +100,7 @@ def snapshot_generator(generator: Generator):
         "gi_qualname"    : <object> gen.gi_qualname,
         "gi_frame_state" : <int>    gen.gi_frame_state,
         "suspended": gen.gi_frame_state == get_frame_suspended(),
+        "exception": exception,
     }
 
 cpdef snapshot_generator_frame(object generator, object analyzer):
@@ -105,6 +120,11 @@ def make_generator(gen_states: Dict, frame_states: Dict):
     cdef PyGenObject* gen = new_generator(func)
     cdef _PyInterpreterFrame* frame = gen.gi_iframe
     cdef PyCodeObject* code = <PyCodeObject*> func.func_code
+
+    exception = gen_states["exception"]
+    if exception is not NullObject:
+        gen.gi_exc_state.exc_value = <PyObject*> (exception)
+        Py_INCREF(exception)
 
     nlocals = frame_states["nlocals"]
     prev_instr_offset = frame_states["prev_instr_offset"]
@@ -127,3 +147,80 @@ def get_generator_type() -> Type:
     # `type` objects are not dynamically allocated
     # hence no incref here
     return <object> &PyGen_Type
+
+cpdef push_generator_exception(object generator):
+    cdef PyGenObject* gen = <PyGenObject*> generator
+    cdef PyThreadState* tstate = PyThreadState_GET()
+
+    gen.gi_exc_state.previous_item = <_PyErr_StackItem*> tstate.exc_info
+    tstate.exc_info = &gen.gi_exc_state
+
+cpdef pop_generator_exception(object generator):
+    cdef PyGenObject* gen = <PyGenObject*> generator
+    cdef PyThreadState* tstate = PyThreadState_GET()
+
+    tstate.exc_info = gen.gi_exc_state.previous_item
+    gen.gi_exc_state.previous_item = NULL
+
+
+cpdef object resume_generator_pop(object generator, object is_leaf, object ret_val = None):
+    """resume_generator_pop(generator: Generator, is_leaf: bool, ret_val: Any) -> Tuple[Any, Optional[ExceptionStates]]
+
+        Mimic CPython's behavior for generator evaluation
+        See gen_send_ex2() in https://github.com/python/cpython/blob/3.11/Objects/genobject.c
+    """
+    cdef PyGenObject* gen = <PyGenObject*> generator
+    if gen.gi_frame_state != get_frame_suspended() \
+        and gen.gi_frame_state != get_frame_executing():
+        raise ValueError(f"invalid generator: {generator}: frame cleared or not started")
+    cdef _PyInterpreterFrame* frame = gen.gi_iframe
+    cdef PyThreadState* tstate = PyThreadState_GET()
+    frame.previous = <_PyInterpreterFrame*> tstate.cframe.current_frame
+    cdef int _is_leaf = <int> is_leaf
+    gen.gi_frame_state = get_frame_executing()
+
+    Py_INCREF(ret_val)
+    frame.localsplus[frame.stacktop] = <PyObject*> ret_val;
+    frame.stacktop += 1
+
+    cdef PyObject* result = _PyEval_EvalFrameDefault(tstate, frame, 0)
+    pop_generator_exception(<object> gen)
+    frame.previous = NULL
+    cdef PyObject* p_type  = NULL
+    cdef PyObject* p_value = NULL
+    cdef PyObject* p_traceback = NULL
+    if result != NULL and gen.gi_frame_state == get_frame_suspended():
+        return (<object> result, None) # return by `yield`
+    # manually clear the interpreter frame owned by generator
+    if result == NULL:
+        PyErr_Fetch(&p_type, &p_value, &p_traceback)
+        assert p_type != NULL and p_value != NULL
+        assert not isinstance(<object> p_value, StopIteration)
+        tb = None
+        if p_traceback != NULL:
+            tb = <object> p_traceback
+        if clear_generator_frame(gen) != 0:
+            raise RuntimeError(f"clear interpreter frame failed, generator: {generator}")
+        return (NullObject, (<object> p_type, <object> p_value, tb))
+    result_obj = <object> result
+    e = StopIteration(result_obj)
+
+    if clear_generator_frame(gen) != 0:
+        raise RuntimeError(f"clear interpreter frame failed, generator: {generator}")
+    # TODO: add traceback support, here we simply pass `None`
+    tb = None
+    return (result_obj, (type(e), e, tb))
+
+class ClearFrame(Exception): ...
+
+cdef int clear_generator_frame(PyGenObject* gen):
+    gen.gi_frame_state = get_frame_suspended()
+    try:
+        (<object> gen).throw(ClearFrame())
+    except ClearFrame:
+        pass
+    except Exception as e:
+        raise RuntimeError("error occur during frame clear") from e
+    if gen.gi_frame_state == get_frame_cleared():
+        return 0
+    return -1
