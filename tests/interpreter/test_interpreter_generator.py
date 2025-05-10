@@ -24,6 +24,21 @@ def test_snapshot_generator():
     assert "foo" in captured["gi_qualname"]
 
 
+def test_snapshot_generator_with_exception():
+    def foo():
+        try:
+            raise RuntimeError("test")
+        except RuntimeError:
+            yield 41
+            yield 42
+
+    gen = foo()
+    assert isinstance(gen, Generator)
+    assert next(gen) == 41
+    captured = _generator.snapshot_generator(gen)
+    assert isinstance(captured["exception"], RuntimeError)
+
+
 def test_make_generator():
     def foo():
         frame = inspect.currentframe()
@@ -85,3 +100,86 @@ def test_snapshot_generator_frame():
     with pytest.raises(StopIteration):
         assert next(new_gen) == 42
         next(new_gen)
+
+
+def test_resume_generator():
+    def foo():
+        yield 41
+        yield 42
+
+    gen = foo()
+    assert next(gen) == 41
+
+    ret, exc = _generator.resume_generator(gen, False, None)
+    assert exc is None
+    assert ret == 42
+
+
+def test_generator_execution_with_exception():
+    def foo():
+        try:
+            raise RuntimeError("test")
+        except RuntimeError:
+            yield 41
+            yield 42
+            raise
+
+    gen = foo()
+    assert next(gen) == 41
+
+    gen_states = _generator.snapshot_generator(gen)
+    assert isinstance(gen_states["exception"], RuntimeError)
+    frame_states = _generator.snapshot_generator_frame(gen, analyze_stack_top)
+    assert gen_states["gi_frame_state"] == -1
+    # continue execution
+    new_gen = _generator.make_generator(gen_states, frame_states)
+    ret, exc = _generator.resume_generator(new_gen, False, None)
+    assert ret == 42
+    assert exc is None
+    # reraise exception
+    with pytest.raises(RuntimeError):
+        next(new_gen)
+    with pytest.raises(StopIteration):
+        next(new_gen)
+
+
+def test_resume_return_value():
+    def foo():
+        x = yield 42
+        assert x == "42"
+        # return None <-- implicit return
+
+    # first starts the generator
+    gen = foo()
+    assert next(gen) == 42
+    # then resume
+    ret, exc = _generator.resume_generator(gen, False, "43")
+    assert ret is _frame.NullObject
+    assert exc is not None
+    assert isinstance(exc[1], AssertionError)
+    del gen
+
+    gen = foo()
+    assert next(gen) == 42
+    ret, exc = _generator.resume_generator(gen, False, "42")
+    assert ret is None
+    assert exc is not None
+    assert isinstance(exc[1], StopIteration)
+
+
+def test_resume_with_exception():
+    def foo():
+        yield 42
+        # return None <-- implicit return
+
+    gen = foo()
+    assert next(gen) == 42
+    ret, exc = _generator.resume_generator(
+        gen,
+        False,
+        None,
+        (RuntimeError, RuntimeError("42"), None),
+    )
+    assert ret is _frame.NullObject
+    assert exc is not None
+    assert isinstance(exc[1], RuntimeError)
