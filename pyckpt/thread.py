@@ -1,15 +1,20 @@
 import sys
 import threading
 from concurrent.futures import Future
+from dataclasses import dataclass
 from threading import Thread
-from typing import Callable, Dict, List, Optional, Set, Type
+from typing import Any, Callable, Dict, List, Optional
 
 import dill
-from dataclasses import dataclass
 
 from pyckpt import interpreter, platform
 from pyckpt.analyzer import analyze_stack_top
 from pyckpt.frame import FrameCocoon
+from pyckpt.objects import (
+    ObjectCocoon,
+    SnapshotContextManager,
+    SpawnContextManager,
+)
 
 
 class LiveThread:
@@ -22,7 +27,7 @@ class LiveThread:
         original_id: int,
         leaf_frame: FrameCocoon,
         non_leaf_frames: List[FrameCocoon],
-        contexts: Dict,
+        contexts: SpawnContextManager,
         states: Dict,
     ):
         for non_leaf in non_leaf_frames:
@@ -32,12 +37,12 @@ class LiveThread:
         self._non_leaf_frames = non_leaf_frames
         self._result = Future()
         self._handle = threading.Thread(target=self._evaluate)
-        self._original_id = original_id
         self._contexts = contexts
         self._states = states
 
-        spawn_context = contexts[ThreadSpawnContext]
-        spawn_context.thread_table[self._original_id] = self._handle
+        # It's important that all ThreadCocoons should be spawned first
+        # before start evaluating.
+        contexts.register_object(original_id, self._handle)
 
     def _evaluate(self):
         leaf_frame = self._leaf_frame.spawn(self._contexts)
@@ -68,28 +73,13 @@ class LiveThread:
         return self._result.result(timeout=timeout)
 
 
-@dataclass(frozen=True)
-class ThreadStubContext:
-    contained_threads: Set[int]
-
-    @staticmethod
-    def new():
-        return ThreadStubContext(set())
-
-    @staticmethod
-    def get_contained_threads(contexts: Dict[int, "ThreadStubContext"]):
-        if ThreadStubContext not in contexts:
-            raise ValueError("contexts not contain `ThreadStubContext`")
-        return contexts[ThreadStubContext].contained_threads
+def spawn_thread(original_id: int, mgr: SpawnContextManager):
+    return mgr.retrieve_object(original_id)
 
 
-@dataclass(frozen=True)
-class ThreadSpawnContext:
-    thread_table: Dict[int, Thread]
-
-    @staticmethod
-    def new():
-        return ThreadSpawnContext({})
+def snapshot_thread(t: Thread, _mgr: Any):
+    original_id = t.ident
+    return ObjectCocoon(original_id, spawn_thread)
 
 
 @dataclass(frozen=True)
@@ -104,34 +94,17 @@ class ThreadCocoon:
         thread_id: Optional[int]
 
     @staticmethod
-    def register_stub(stub_registry: Dict):
-        stub_registry[Thread] = (
-            ThreadCocoon.stub_objects,
-            ThreadCocoon.get_real_objects,
-        )
-
-    @staticmethod
-    def stub_objects(t: Thread, contexts: Dict[Type, ThreadStubContext]):
-        context = contexts[ThreadStubContext]
-        thread_id = t.ident
-        context.contained_threads.add(thread_id)
-        return ThreadCocoon.ThreadStub(thread_id)
-
-    @staticmethod
-    def get_real_objects(stub: ThreadStub, contexts: Dict[Type, ThreadSpawnContext]):
-        context = contexts[ThreadSpawnContext]
-        return context.thread_table[stub.thread_id]
+    def register_snapshot_hooks(registry: Dict):
+        registry[Thread] = snapshot_thread
 
     @staticmethod
     def from_thread(
         t: Thread,
         stub_registry: Dict,
-        contexts: Dict,
+        ctx_mgr: SnapshotContextManager,
         *,
         max_frames: Optional[int] = None,
     ):
-        if ThreadStubContext not in contexts:
-            raise ValueError("context not contain `ThreadStubContext`")
         if Thread not in stub_registry:
             raise ValueError("`Thread` class not in stub registry")
 
@@ -142,7 +115,7 @@ class ThreadCocoon:
         frame = sys._current_frames()[t.ident]
         non_leaf_frames = []
         last_frame = FrameCocoon.from_frame(
-            frame, is_other, analyze_stack_top, stub_registry, contexts
+            frame, is_other, analyze_stack_top, stub_registry, ctx_mgr
         )
         if last_frame is None:  # return from LiveThread
             return None
@@ -159,7 +132,7 @@ class ThreadCocoon:
                 break
             non_leaf_frames.append(
                 FrameCocoon.from_frame(
-                    frame, False, analyze_stack_top, stub_registry, contexts
+                    frame, False, analyze_stack_top, stub_registry, ctx_mgr
                 )
             )
             if frame.f_code == ThreadCocoon.from_thread.__code__:
@@ -167,7 +140,7 @@ class ThreadCocoon:
         thread_state = interpreter.save_thread_state(t)
         return ThreadCocoon(t.ident, last_frame, non_leaf_frames, thread_state)
 
-    def spawn(self, contexts: Dict[str, ThreadSpawnContext]) -> LiveThread:
+    def spawn(self, contexts: SpawnContextManager) -> LiveThread:
         live_thread = LiveThread(
             self.thread_id,
             self.leaf_frame,
