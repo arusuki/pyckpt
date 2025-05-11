@@ -1,35 +1,34 @@
 from pyckpt import objects
-from pyckpt.objects import StubObject
 
 
-def test_stub_objects_no_stubs():
+def test_snapshot_objects():
     objs = [1, "2", [3]]
 
-    ret = objects.stub_objects({}, objs, {})
+    ret = objects.create_snapshot({}, objs, {})
 
     for o1, o2 in zip(objs, ret):
         assert o1 is o2
 
 
 def test_stub_objects():
-    def save_str_int(s: str, _):
+    def snapshot_str2int(s: str, _):
         return int(s)
 
-    def load_str_int(a: int, _):
+    def spawn_int2str(a: int, _):
         return f"{a}"
 
-    reg = {str: (save_str_int, load_str_int)}
+    reg = {str: (snapshot_str2int, spawn_int2str)}
 
     objs = ["1", "2", "3"]
 
-    ret = objects.stub_objects(reg, objs, {})
+    ret = objects.create_snapshot(reg, objs, {})
 
     for o1, o2 in zip(objs, ret):
-        assert isinstance(o2, StubObject)
+        assert isinstance(o2, objects.ObjectCocoon)
         assert isinstance(o2.states, int)
         assert int(o1) == o2.states
 
-    rec = objects.get_real_objects(ret, {})
+    rec = objects.spawn_objects(ret, {})
 
     for o1, o2 in zip(objs, rec):
         assert o1 == o2

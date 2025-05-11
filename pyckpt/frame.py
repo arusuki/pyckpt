@@ -67,8 +67,8 @@ class FrameCocoon:
         contexts: Dict,
     ):
         captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
-        nlocals = objects.stub_objects(stub_registry, captured["nlocals"], contexts)
-        stack = objects.stub_objects(stub_registry, captured["stack"], contexts)
+        nlocals = objects.create_snapshot(stub_registry, captured["nlocals"], contexts)
+        stack = objects.create_snapshot(stub_registry, captured["stack"], contexts)
         captured["nlocals"] = nlocals
         captured["stack"] = stack
         if captured["generator"] is not None:
@@ -77,8 +77,8 @@ class FrameCocoon:
         return FrameCocoon(**captured)
 
     def spawn(self, contexts: Dict) -> LiveFrame:
-        nlocals = objects.get_real_objects(self.nlocals, contexts)
-        stack = objects.get_real_objects(self.stack, contexts)
+        nlocals = objects.spawn_objects(self.nlocals, contexts)
+        stack = objects.spawn_objects(self.stack, contexts)
         return LiveFrame(
             func=self.func,
             is_leaf=self.is_leaf,

@@ -1,8 +1,8 @@
 from typing import Any, Callable, Dict, Generator, List, Tuple, Type
 
-LoadHook = Callable[[Any], Any]
-StoreHook = Callable[[Any, Dict], Any]
-RegistryHook = Tuple[LoadHook, StoreHook]
+SnapshotMethod = Callable[[Any, Dict], Any]
+SpawnMethod = Callable[[Any, Dict], Any]
+RegistryHook = Tuple[SnapshotMethod, SpawnMethod]
 
 
 class NullObjectType:
@@ -12,36 +12,56 @@ class NullObjectType:
 NullObject = NullObjectType()
 
 
-class StubObject:
+class ObjectCocoon:
     def __init__(
         self,
         states: Any,
-        load_hook: LoadHook,
+        spawn_method: SpawnMethod,
     ):
-        self.load_hook = load_hook
         self.states = states
-
-    def load_client(self, contexts: Dict):
-        return self.load_hook(self.states, contexts)
+        self.spawn_method = spawn_method
 
 
-def stub_objects(
-    registry: Dict[Type, RegistryHook], objects: List[Any], contexts: Dict
+def create_snapshot(
+    registry: Dict[Type, RegistryHook],
+    objects: List[Any],
+    contexts: Dict,
 ):
+    """
+    Create snapshots of objects using the provided registry.
+
+    Args:
+        registry: A dictionary mapping object types to their snapshot and spawn methods.
+        objects: A list of objects to snapshot.
+        contexts: A dictionary of additional context information.
+
+    Returns:
+        A new list of objects, where applicable objects are replaced with ObjectCocoon instances.
+    """
     objects = objects.copy()
     for idx, obj in enumerate(objects):
         if isinstance(obj, Generator):
             raise NotImplementedError("save generator type")
         obj_type = type(obj)
         if obj_type in registry:
-            store, load = registry[obj_type]
-            objects[idx] = StubObject(store(obj, contexts), load)
+            snapshot, spawn = registry[obj_type]
+            objects[idx] = ObjectCocoon(snapshot(obj, contexts), spawn)
     return objects
 
 
-def get_real_objects(objects: List[Any], contexts: Dict):
+def spawn_objects(objects: List[Any], contexts: Dict):
+    """
+    Restore objects from their snapshots.
+
+    Args:
+        objects: A list of objects, some of which may be ObjectCocoon instances.
+        contexts: A dictionary of additional context information.
+
+    Returns:
+        A new list of objects, where ObjectCocoon instances are replaced with their original objects.
+    """
     objects = objects.copy()
     for idx, obj in enumerate(objects):
-        if isinstance(obj, StubObject):
-            objects[idx] = obj.load_client(contexts)
+        if isinstance(obj, ObjectCocoon):
+            objects[idx] = obj.spawn_method(obj.states, contexts)
     return objects
