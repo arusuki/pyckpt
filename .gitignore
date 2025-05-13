@@ -178,3 +178,4 @@ pyrightconfig.json
 pyckpt/**/*.c
 
 .vscode
+.cspell
