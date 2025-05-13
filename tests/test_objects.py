@@ -44,7 +44,7 @@ def test_snapshot_by_original_id():
     spawn_context = objects.SpawnContextManager()
     spawn_context.register_object(id(obj), obj)
 
-    restored_obj = snapshot.spawn_method(snapshot, spawn_context)
+    restored_obj = snapshot.spawn_method(snapshot.states, spawn_context)
     assert restored_obj is obj
 
 
@@ -109,7 +109,7 @@ def test_spawn_by_original_id():
     spawn_context.register_object(obj_id, obj)
 
     cocoon = objects.snapshot_by_original_id(obj, None)
-    restored_obj = cocoon.spawn_method(cocoon, spawn_context)
+    restored_obj = cocoon.spawn_method(cocoon.states, spawn_context)
 
     assert restored_obj is obj
 

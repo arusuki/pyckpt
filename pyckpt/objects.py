@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, Generator, List, Tuple, Type, TypeVar
 SnapshotMethod = Callable[[Any, Dict], "ObjectCocoon"]
 SpawnMethod = Callable[[Any, Dict], Any]
 RegistryHook = Tuple[SnapshotMethod]
-ContextStateBuilder = Callable[[Dict, "SnapshotContextManager"], Dict]
+ContextStateBuilder = Callable[[Dict, "SnapshotContextManager"], NoneType]
 SpawnContextBuilder = Callable[["SpawnContextManager", Dict], NoneType]
 
 
@@ -41,7 +41,7 @@ class SnapshotContextManager(dict):
         """
         Register a context using its type as the key.
         """
-        self[type(context)] = context
+        super().__setitem__(type(context), context)
 
     def __setitem__(self, _key, _value):
         raise ValueError(
@@ -72,8 +72,8 @@ class SpawnContextManager(dict):
         return ctx
 
 
-def _spawn_by_original_id(obj: "ObjectCocoon", mgr: SpawnContextManager):
-    return mgr.retrieve_object(obj.states)
+def _spawn_by_original_id(obj: int, mgr: SpawnContextManager):
+    return mgr.retrieve_object(obj)
 
 
 def snapshot_by_original_id(obj: Any, _mgr: SnapshotContextManager):
