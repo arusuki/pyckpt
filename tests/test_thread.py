@@ -1,37 +1,29 @@
 import threading
-from types import FrameType
-from typing import Any, Optional
+from typing import List, Optional
 
-from pyckpt.objects import ObjectCocoon, SnapshotContextManager, SpawnContextManager
-from pyckpt.thread import LiveThread, ThreadCocoon
+from pyckpt.objects import CRContextCocoon, SnapshotContextManager, SpawnContextManager
+from pyckpt.thread import LiveThread, ThreadCocoon, ThreadContext
 
 
 def test_thread_capture(capsys):
     c: Optional[ThreadCocoon] = None
+    ctx_states: Optional[List[CRContextCocoon]] = None
 
     s = "hello_world"
 
-    def ret_none(*_):
-        return None
-
-    def snapshot_none(obj: Any, _):
-        return ObjectCocoon(None, ret_none)
-
     def test():
+        nonlocal ctx_states
         nonlocal c
 
-        registry = {}
-        ThreadCocoon.register_snapshot_hooks(registry)
-        registry[FrameType] = snapshot_none
         snapshot_ctxs = SnapshotContextManager()
-
-        thread_cocoon = ThreadCocoon.from_thread(
-            threading.current_thread(),
-            registry,
-            snapshot_ctxs,
+        thread_ctx = ThreadContext()
+        snapshot_ctxs.register_context(thread_ctx)
+        thread_cocoon = ThreadCocoon.snapshot_from_thread(
+            threading.current_thread(), snapshot_ctxs
         )
 
         if thread_cocoon is not None:
+            ctx_states = snapshot_ctxs.snapshot_contexts()
             c = thread_cocoon.clone()
 
         print(s)
@@ -43,7 +35,9 @@ def test_thread_capture(capsys):
     result = capsys.readouterr()
     assert result.out.count(s) == 1
     assert isinstance(c, ThreadCocoon)
-    spawn_ctxs = SpawnContextManager()
+    assert isinstance(ctx_states, List)
+
+    spawn_ctxs = SpawnContextManager.build_from_context_snapshot(ctx_states)
     live_thread: LiveThread = c.spawn(spawn_ctxs)
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
@@ -52,32 +46,25 @@ def test_thread_capture(capsys):
 
 def test_thread_capture_with_exception(capsys):
     c: Optional[ThreadCocoon] = None
+    ctx_states: Optional[List[CRContextCocoon]] = None
 
     s = "hello_world"
 
-    def ret_none(*_):
-        return None
-
-    def snapshot_none(obj: Any, _):
-        return ObjectCocoon(None, ret_none)
-
     def test():
         nonlocal c
-
-        stub_registry = {}
-        ThreadCocoon.register_snapshot_hooks(stub_registry)
-        stub_registry[FrameType] = snapshot_none
+        nonlocal ctx_states
         contexts = SnapshotContextManager()
+        thread_ctx = ThreadContext()
+        contexts.register_context(thread_ctx)
         try:
             raise RuntimeError("test")
         except RuntimeError:
-            thread_cocoon = ThreadCocoon.from_thread(
-                threading.current_thread(),
-                stub_registry,
-                contexts,
+            thread_cocoon = ThreadCocoon.snapshot_from_thread(
+                threading.current_thread(), contexts
             )
         if thread_cocoon is not None:
             c = thread_cocoon.clone()
+            ctx_states = contexts.snapshot_contexts()
         print(s)
 
     t = threading.Thread(target=test)
@@ -88,7 +75,7 @@ def test_thread_capture_with_exception(capsys):
     assert result.out.count(s) == 1
 
     assert c is not None
-    spawn_ctx = SpawnContextManager()
+    spawn_ctx = SpawnContextManager.build_from_context_snapshot(ctx_states)
     live_thread: LiveThread = c.spawn(spawn_ctx)
     live_thread.evaluate(timeout=1.0)
 

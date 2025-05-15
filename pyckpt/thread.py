@@ -11,6 +11,8 @@ from pyckpt import interpreter, platform
 from pyckpt.analyzer import analyze_stack_top
 from pyckpt.frame import FrameCocoon
 from pyckpt.objects import (
+    CheckpointRestoreContext,
+    CRContextCocoon,
     ObjectCocoon,
     SnapshotContextManager,
     SpawnContextManager,
@@ -82,6 +84,24 @@ def snapshot_thread(t: Thread, _mgr: Any):
     return ObjectCocoon(original_id, spawn_thread)
 
 
+class ThreadContext(CheckpointRestoreContext):
+    @staticmethod
+    def spawn_method(_states):
+        return ThreadContext()
+
+    def snapshot(self, snapshot_ctxs: "SnapshotContextManager") -> "CRContextCocoon":
+        return CRContextCocoon(ThreadContext.spawn_method, None)
+
+    def register_snapshot_method(self, snapshot_ctxs: "SnapshotContextManager"):
+        snapshot_ctxs.register_snapshot_method(Thread, snapshot_thread)
+
+    def spawn(self, spawn_ctxs: "SpawnContextManager") -> "CheckpointRestoreContext":
+        return
+
+    def spawn_epilog(self, spawn_ctxs: "SpawnContextManager"):
+        pass
+
+
 @dataclass(frozen=True)
 class ThreadCocoon:
     thread_id: int
@@ -94,49 +114,48 @@ class ThreadCocoon:
         thread_id: Optional[int]
 
     @staticmethod
-    def register_snapshot_hooks(registry: Dict):
-        registry[Thread] = snapshot_thread
+    def extract_frames(
+        frame,
+        max_frames: Optional[int],
+        ctx_mgr: SnapshotContextManager,
+    ) -> List[FrameCocoon]:
+        non_leaf_frames = []
+        current_frames = 1
+        stop_code = {Thread.run.__code__}
+        while frame.f_back is not None:
+            if max_frames and current_frames >= max_frames:
+                break
+            frame = frame.f_back
+            if frame.f_code in stop_code:
+                break
+            non_leaf_frames.append(
+                FrameCocoon.snapshot_from_frame(
+                    frame, False, analyze_stack_top, ctx_mgr
+                )
+            )
+            current_frames += 1
+        return non_leaf_frames
 
     @staticmethod
-    def from_thread(
+    def snapshot_from_thread(
         t: Thread,
-        stub_registry: Dict,
-        ctx_mgr: SnapshotContextManager,
+        snapshot_ctxs: SnapshotContextManager,
         *,
         max_frames: Optional[int] = None,
     ):
-        if Thread not in stub_registry:
-            raise ValueError("`Thread` class not in stub registry")
-
+        if Thread not in snapshot_ctxs.registry():
+            raise ValueError("`Thread` class not in snapshot registry")
         is_other = threading.current_thread().ident != t.ident
         if is_other:
             platform.suspend_thread(t)
 
         frame = sys._current_frames()[t.ident]
-        non_leaf_frames = []
-        last_frame = FrameCocoon.from_frame(
-            frame, is_other, analyze_stack_top, stub_registry, ctx_mgr
+        last_frame = FrameCocoon.snapshot_from_frame(
+            frame, is_other, analyze_stack_top, snapshot_ctxs
         )
         if last_frame is None:  # return from LiveThread
             return None
-        non_leaf_frames.append(last_frame)  # return from normal snapshot()
-        current_frames = 1
-        stop_code = {Thread.run.__code__}
-        while frame.f_back is not None:
-            if max_frames:
-                current_frames += 1
-                if current_frames >= max_frames:
-                    break
-            frame = frame.f_back
-            if frame.f_code in stop_code:
-                break
-            non_leaf_frames.append(
-                FrameCocoon.from_frame(
-                    frame, False, analyze_stack_top, stub_registry, ctx_mgr
-                )
-            )
-            if frame.f_code == ThreadCocoon.from_thread.__code__:
-                break  # avoid redundant frames
+        non_leaf_frames = ThreadCocoon.extract_frames(frame, max_frames, snapshot_ctxs)
         thread_state = interpreter.save_thread_state(t)
         return ThreadCocoon(t.ident, last_frame, non_leaf_frames, thread_state)
 

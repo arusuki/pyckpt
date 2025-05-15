@@ -1,6 +1,7 @@
 # pylint: disable=C0104
 import inspect
 import threading
+from ast import FunctionType
 from typing import Optional
 
 import dill
@@ -9,7 +10,7 @@ import pytest
 import pyckpt.frame
 from pyckpt import analyzer, interpreter
 from pyckpt.frame import FrameCocoon, LiveFunctionFrame, LiveGeneratorFrame
-from pyckpt.objects import SpawnContextManager
+from pyckpt.objects import SnapshotContextManager, SpawnContextManager
 
 BIG_NUMBER = 0x3F3F3F3F
 
@@ -45,8 +46,9 @@ def test_capture_with_analyzer():
 
     def add(lhs, rhs):
         nonlocal frame_
+        ctxs = SnapshotContextManager()
         frame_ = FrameCocoon.snapshot_from_frame(
-            inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+            inspect.currentframe(), False, analyzer.analyze_stack_top, ctxs
         )
         return lhs + rhs
 
@@ -68,8 +70,12 @@ def test_capture_with_analyzer():
 
 def test_frame_multiple_evaluation():
     def capture_frame():
+        ctxs = SnapshotContextManager()
         cocoon = FrameCocoon.snapshot_from_frame(
-            inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+            inspect.currentframe(),
+            False,
+            analyzer.analyze_stack_top,
+            ctxs,
         )
         return cocoon, "hello"
 
@@ -87,8 +93,12 @@ def test_frame_multiple_evaluation():
 
 def test_save_cocoon():
     def capture_frame():
+        ctxs = SnapshotContextManager()
         cocoon = FrameCocoon.snapshot_from_frame(
-            inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+            inspect.currentframe(),
+            False,
+            analyzer.analyze_stack_top,
+            ctxs,
         )
         return cocoon, "hello"
 
@@ -105,8 +115,12 @@ def test_save_cocoon():
 
 def test_seg():
     def capture_frame():
+        ctxs = SnapshotContextManager()
         cocoon = FrameCocoon.snapshot_from_frame(
-            inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+            inspect.currentframe(),
+            False,
+            analyzer.analyze_stack_top,
+            ctxs,
         )
         return cocoon, "hello"
 
@@ -125,12 +139,16 @@ def test_seg():
 def test_raise_exception():
     outer_cocoon: Optional[FrameCocoon] = None
     inner_cocoon: Optional[FrameCocoon] = None
+    ctxs = SnapshotContextManager()
 
     def outer():
         nonlocal outer_cocoon
         try:
             outer_cocoon = FrameCocoon.snapshot_from_frame(
-                inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+                inspect.currentframe(),
+                False,
+                analyzer.analyze_stack_top,
+                ctxs,
             )
             inner()
         except RuntimeError as e:
@@ -140,7 +158,10 @@ def test_raise_exception():
     def inner():
         nonlocal inner_cocoon
         inner_cocoon = FrameCocoon.snapshot_from_frame(
-            inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+            inspect.currentframe(),
+            False,
+            analyzer.analyze_stack_top,
+            ctxs,
         )
         raise RuntimeError("test")
 
@@ -163,12 +184,17 @@ def test_raise_exception():
 
 
 def test_handled_exception():
+    ctxs = SnapshotContextManager()
+
     def capture_frame():
         try:
             raise RuntimeError("JB")
         except RuntimeError:
             cocoon = FrameCocoon.snapshot_from_frame(
-                inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+                inspect.currentframe(),
+                False,
+                analyzer.analyze_stack_top,
+                ctxs,
             )
             ts = interpreter.save_thread_state(threading.current_thread())
             return (cocoon, ts), "hello"
@@ -211,10 +237,20 @@ def test_live_generator_frame_evaluation():
         _ = live_gen_frame._is_leaf
 
 
+def _make_new_generator_from_function(func: FunctionType):
+    return interpreter.make_new_generator(
+        func_code=func.__code__,
+        func_name=func.__name__,
+        func_qualname=func.__qualname__,
+    )
+
+
 def test_spawn_with_generator_frame():
+    ctxs = SnapshotContextManager()
+
     def generator_function():
         c = FrameCocoon.snapshot_from_frame(
-            inspect.currentframe(), False, analyzer.analyze_stack_top, {}, {}
+            inspect.currentframe(), False, analyzer.analyze_stack_top, ctxs
         )
         if c:
             yield c
@@ -229,7 +265,9 @@ def test_spawn_with_generator_frame():
     with pytest.raises(StopIteration):
         next(gen)
     # Spawn a LiveGeneratorFrame from the cocoon
-    live_frame = cocoon.spawn({})
+    spawn_ctxs = SpawnContextManager()
+    spawn_ctxs.register_object(id(gen), _make_new_generator_from_function(cocoon.func))
+    live_frame = cocoon.spawn(spawn_ctxs)
     assert isinstance(live_frame, LiveGeneratorFrame)
 
     # Evaluate the generator frame
@@ -265,6 +303,7 @@ def test_spawn_with_function_frame():
         nlocals=[3, 4],
         prev_instr_offset=-1,
         generator=None,
+        gen_original_id=None,
     )
 
     # Spawn a LiveFunctionFrame from the cocoon
@@ -285,6 +324,8 @@ def test_spawn_with_function_frame():
 
 
 def test_snapshot_from_generator_frame():
+    ctxs = SnapshotContextManager()
+
     def generator_function():
         frame = inspect.currentframe()
         yield frame
@@ -300,8 +341,7 @@ def test_snapshot_from_generator_frame():
         frame=frame,
         is_leaf=False,
         stack_analyzer=analyzer.analyze_stack_top,
-        stub_registry={},
-        contexts={},
+        contexts=ctxs,
     )
 
     assert isinstance(cocoon, FrameCocoon)
@@ -310,7 +350,9 @@ def test_snapshot_from_generator_frame():
     assert cocoon.generator is not None
 
     # Spawn a LiveGeneratorFrame from the cocoon
-    live_frame = cocoon.spawn({})
+    spawn_ctxs = SpawnContextManager()
+    spawn_ctxs.register_object(id(gen), _make_new_generator_from_function(cocoon.func))
+    live_frame = cocoon.spawn(spawn_ctxs)
     assert isinstance(live_frame, LiveGeneratorFrame)
 
     # Evaluate the generator frame
