@@ -1,7 +1,7 @@
 # cython: embedsignature=True, embedsignature.format=python
 import inspect
 import sys
-from types import TracebackType
+from types import CodeType, FunctionType, TracebackType
 
 from cpython.ref cimport Py_INCREF, PyTypeObject
 from typing import Dict, Generator, Type
@@ -32,6 +32,10 @@ cdef extern from "Python.h":
     # define check_exception_StopIteration() (PyErr_ExceptionMatches(PyExc_StopIteration))
     """
 
+    int CO_GENERATOR
+    int CO_COROUTINE
+    int CO_ASYNC_GENERATOR
+
     cdef int check_exception_StopIteration()
 
     ctypedef struct _PyErr_StackItem:
@@ -55,21 +59,20 @@ cdef extern from "Python.h":
 
     cdef PyTypeObject PyGen_Type
 
-cdef PyGenObject* new_generator(PyFunctionObject *func):
-    cdef PyCodeObject* code = <PyCodeObject*> func.func_code
+cdef PyGenObject* new_generator(PyCodeObject *code, PyObject* func_name, PyObject* func_qualname):
     cdef int slots = code.co_nlocalsplus + code.co_stacksize;
     cdef PyGenObject* gen = New_Gen(slots)
     if gen == NULL:
         return NULL
-    if func.func_name == NULL or func.func_qualname == NULL:
+    if func_name == NULL or func_qualname == NULL:
         return NULL
     gen.gi_frame_state = get_frame_cleared()
     gen.gi_code = code
     gen.gi_exc_state.previous_item = NULL
     gen.gi_exc_state.exc_value = NULL
     gen.gi_weakreflist = NULL
-    gen.gi_name = func.func_name
-    gen.gi_qualname = func.func_qualname
+    gen.gi_name = func_name
+    gen.gi_qualname = func_qualname
     Py_INCREF(<object> gen.gi_code)
     Py_INCREF(<object> gen.gi_name)
     Py_INCREF(<object> gen.gi_qualname)
@@ -109,17 +112,17 @@ cpdef snapshot_generator_frame(object generator, object analyzer):
         raise ValueError("snapshot non-suspended generator is not supported")
     return _snapshot_frame(gen.gi_iframe, False, analyzer)
 
-def make_generator(gen_states: Dict, frame_states: Dict):
+cdef object _setup_generator(PyGenObject* gen, object gen_states, object frame_states):
+    cdef _PyInterpreterFrame* frame = gen.gi_iframe
+    cdef PyCodeObject* code = <PyCodeObject*> gen.gi_code
     cdef PyFunctionObject* func = <PyFunctionObject*> frame_states["func"]
+
     # N.B. The generator somehow should own a strong reference to the funcobject.
     # This is different from frame evaluation apis where the caller owns the reference.
     # Logically, the generator should own everything it could `touch`,and it can touch
     # the funcobject through the _PyInterpreterFrame C struct (which is not a PyObject!)
     # So just make the GC happy :)
     Py_INCREF(<object> func)
-    cdef PyGenObject* gen = new_generator(func)
-    cdef _PyInterpreterFrame* frame = gen.gi_iframe
-    cdef PyCodeObject* code = <PyCodeObject*> func.func_code
 
     exception = gen_states["exception"]
     if exception is not NullObject:
@@ -139,6 +142,40 @@ def make_generator(gen_states: Dict, frame_states: Dict):
     if gen == NULL:
         raise RuntimeError("failed to make new generator")
     return <object> gen
+
+def make_generator(gen_states: Dict, frame_states: Dict):
+    cdef PyFunctionObject* func = <PyFunctionObject*> frame_states["func"]
+    cdef PyGenObject* gen = new_generator(
+        <PyCodeObject*> func.func_code,
+        <PyObject*>     func.func_name,
+        <PyObject*>     func.func_qualname,
+    )
+    return _setup_generator(gen, gen_states, frame_states)
+
+cpdef make_new_generator(object func_code, object func_name, object func_qualname):
+    if not isinstance(func_code, CodeType):
+        raise ValueError(f"Expected a function, got {type(func_code).__name__}")
+    cdef PyCodeObject* code = <PyCodeObject*> func_code
+    cdef int co_flags = code.co_flags
+    cdef int mask = (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)
+    cdef int flag = co_flags & mask
+    if flag != CO_GENERATOR:
+        raise ValueError(f"code:{func_code} is not a generator function")
+    cdef PyGenObject* gen = new_generator(code, <PyObject*> func_name, <PyObject*> func_qualname)
+    if gen == NULL:
+        raise ValueError("failed to make new generator")
+    return <object> gen
+
+def setup_generator(generator: Generator, gen_states: Dict, frame_states: Dict):
+    if not isinstance(generator, Generator):
+        raise ValueError(f"Provided object {generator} is not a generator")
+    cdef PyFunctionObject* func = <PyFunctionObject*> frame_states["func"]
+    cdef PyCodeObject* code = <PyCodeObject*> func.func_code
+    cdef PyGenObject* gen = <PyGenObject*> generator
+    if gen.gi_code != code:
+        raise ValueError("The generator's code object does not match the provided frame_states code object")
+    Py_INCREF(<object> func)
+    return _setup_generator(gen, gen_states, frame_states)
 
 def is_suspended(generator: Generator):
     return (<PyGenObject*> generator).gi_frame_state == get_frame_suspended()

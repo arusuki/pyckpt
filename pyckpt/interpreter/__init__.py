@@ -8,8 +8,14 @@ from .frame import (
 )
 from .generator import (
     get_generator_type,
+    is_executing,
+    is_suspended,
     make_generator,
+    make_new_generator,
+    resume_generator,
+    setup_generator,
     snapshot_generator,
+    snapshot_generator_frame,
 )
 
 __all__ = [
@@ -22,4 +28,10 @@ __all__ = [
     "make_generator",
     "snapshot_generator",
     "NullObject",
+    "is_suspended",
+    "is_executing",
+    "resume_generator",
+    "snapshot_generator_frame",
+    "make_new_generator",
+    "setup_generator",
 ]

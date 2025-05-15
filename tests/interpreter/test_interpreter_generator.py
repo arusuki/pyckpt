@@ -1,5 +1,5 @@
 import inspect
-from types import FrameType
+from types import FrameType, FunctionType
 from typing import Generator
 
 import dill
@@ -8,6 +8,14 @@ import pytest
 from pyckpt.analyzer import analyze_stack_top
 from pyckpt.interpreter import frame as _frame
 from pyckpt.interpreter import generator as _generator
+
+
+def _make_new_generator_from_function(func: FunctionType):
+    return _generator.make_new_generator(
+        func_code=func.__code__,
+        func_name=func.__name__,
+        func_qualname=func.__qualname__,
+    )
 
 
 def test_snapshot_generator():
@@ -70,6 +78,60 @@ def test_make_generator():
     with pytest.raises(StopIteration):
         assert next(gen) == 42
         next(gen)
+
+
+def test_make_new_generator():
+    def not_generator():
+        return 42
+
+    def foo():
+        yield 42
+
+    with pytest.raises(ValueError):
+        _make_new_generator_from_function(not_generator)
+
+    not_code = None
+    with pytest.raises(ValueError):
+        _generator.make_new_generator(not_code, "test", "test_make_new_generator.test")
+
+    new_gen = _make_new_generator_from_function(foo)
+
+    with pytest.raises(StopIteration):
+        next(new_gen)
+
+
+def test_setup_generator():
+    def foo():
+        yield 41
+        yield 42
+
+    def bar():
+        yield 41
+        yield 42
+
+    gen = foo()
+    assert next(gen) == 41
+    gen_states = _generator.snapshot_generator(gen)
+    frame_states = _generator.snapshot_generator_frame(gen, analyze_stack_top)
+    new_gen = _make_new_generator_from_function(foo)
+    _generator.setup_generator(new_gen, gen_states, frame_states)
+
+    assert next(new_gen) == 42
+    with pytest.raises(StopIteration):
+        next(new_gen)
+
+    assert next(gen) == 42
+    with pytest.raises(StopIteration):
+        next(gen)
+
+    wrong_gen = bar()
+    assert next(wrong_gen) == 41
+    gen_states = _generator.snapshot_generator(wrong_gen)
+    frame_states = _generator.snapshot_generator_frame(wrong_gen, analyze_stack_top)
+
+    new_gen = _make_new_generator_from_function(foo)
+    with pytest.raises(ValueError):
+        _generator.setup_generator(new_gen, gen_states, frame_states)
 
 
 def test_get_generator_type():
