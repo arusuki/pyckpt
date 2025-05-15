@@ -1,57 +1,111 @@
-from types import NoneType
-from typing import Any, Callable, Dict, Generator, List, Tuple, Type, TypeVar
+from abc import ABC, abstractmethod
+from types import FrameType, NoneType
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
-SnapshotMethod = Callable[[Any, Dict], "ObjectCocoon"]
-SpawnMethod = Callable[[Any, Dict], Any]
+from attr import dataclass
+
+SnapshotMethod = Callable[[Any, "SnapshotContextManager"], "ObjectCocoon"]
+SpawnMethod = Callable[[Any, "SpawnContextManager"], Any]
 RegistryHook = Tuple[SnapshotMethod]
 ContextStateBuilder = Callable[[Dict, "SnapshotContextManager"], NoneType]
 SpawnContextBuilder = Callable[["SpawnContextManager", Dict], NoneType]
 
 
-class SnapshotContextManager(dict):
-    def __init__(self):
-        super().__init__()
-        self.state_builder: List[ContextStateBuilder] = []
-        self.spawn_ctx_builders = []
+@dataclass(slots=True)
+class CRContextCocoon:
+    spawn_method: Callable[[Any], "CheckpointRestoreContext"]
+    states: Any
 
-    def build_states(self) -> Dict:
-        states = {}
-        states["spawn_ctx_builder"] = self.spawn_ctx_builders.copy()
-        for builder in self.state_builder:
-            builder(states, self)
-        return states
+    def spawn(self) -> "CheckpointRestoreContext":
+        return self.spawn_method(self.states)
 
-    def register_state_builder(
-        self,
-        state_builder: ContextStateBuilder,
-        spawn_ctx_builder: SpawnContextBuilder,
-    ):
-        self.state_builder.append(state_builder)
-        self.spawn_ctx_builders.append(spawn_ctx_builder)
+
+class CheckpointRestoreContext(ABC):
+    @abstractmethod
+    def snapshot(self, snapshot_ctxs: "SnapshotContextManager") -> CRContextCocoon:
+        pass
+
+    @abstractmethod
+    def spawn(self, spawn_ctxs: "SpawnContextManager") -> "CheckpointRestoreContext":
+        pass
+
+    def spawn_epilog(self, spawn_ctxs: "SpawnContextManager"):
+        return
+
+    def register_snapshot_method(
+        self, snapshot_ctxs: "SnapshotContextManager"
+    ) -> Optional[SpawnMethod]:
+        return
+
+
+class ContextManager:
+    def __init__(self, contexts: Optional[Dict]):
+        if contexts is None:
+            contexts = {}
+        self._contexts: Dict[Type, CheckpointRestoreContext] = contexts
 
     C = TypeVar("C")
+
+    def __getitem__(self, context_type: C) -> C:
+        return self.get_context(context_type)
 
     def get_context(self, context_type: C) -> C:
         """
         Retrieve a context of the specified type.
         """
-        return self[context_type]
+        return self._contexts[context_type]
 
-    def register_context(self, context: Any):
+    def register_context(self, context: CheckpointRestoreContext):
         """
         Register a context using its type as the key.
         """
-        super().__setitem__(type(context), context)
+        context_type = type(context)
+        if context_type in self._contexts:
+            raise ValueError(
+                f"context of type {context_type} has already been registered"
+            )
+        self._contexts[type(context)] = context
 
-    def __setitem__(self, _key, _value):
-        raise ValueError(
-            "directly set snapshot contexts is not allowed, use `register_context()` instead"
-        )
+
+class SnapshotContextManager(ContextManager):
+    def __init__(
+        self,
+        contexts: Optional[Dict] = None,
+        registry: Optional[Dict] = None,
+    ):
+        if registry is None:
+            registry = new_snapshot_registry()
+        self._registry = registry
+        super().__init__(contexts)
+
+    def snapshot_contexts(self) -> List[CRContextCocoon]:
+        return [ctx.snapshot(self) for ctx in self._contexts.values()]
+
+    def snapshot_registry(self):
+        return self._registry
+
+    def register_snapshot_method(self, object_type: Type, snapshot: SnapshotMethod):
+        self._registry[object_type] = snapshot
+
+    def registry(self):
+        return self._registry
+
+    def register_context(self, context: CheckpointRestoreContext):
+        context.register_snapshot_method(self)
+        return super().register_context(context)
 
 
-class SpawnContextManager(dict):
-    def __init__(self):
+class SpawnContextManager(ContextManager):
+    def __init__(self, contexts: Optional[Dict] = None):
+        super().__init__(contexts)
         self._object_pool: Dict[int, Any] = {}
+        for ctx in self._contexts.values():
+            ctx.spawn(self)
+
+    @staticmethod
+    def build_from_context_snapshot(states: List[CRContextCocoon]):
+        ctxs = [cocoon.spawn() for cocoon in states]
+        return SpawnContextManager({type(ctx): ctx for ctx in ctxs})
 
     def register_object(self, original_id, obj):
         self._object_pool[original_id] = obj
@@ -63,22 +117,9 @@ class SpawnContextManager(dict):
             )
         return self._object_pool[original_id]
 
-    @staticmethod
-    def build_from_snapshot_states(states: Dict):
-        ctx = SpawnContextManager()
-        spawn_builders: List[SpawnContextBuilder] = states["spawn_ctx_builder"]
-        for spawn_builder in spawn_builders:
-            spawn_builder(ctx, states)
-        return ctx
-
-
-def _spawn_by_original_id(obj: int, mgr: SpawnContextManager):
-    return mgr.retrieve_object(obj)
-
-
-def snapshot_by_original_id(obj: Any, _mgr: SnapshotContextManager):
-    original_id = id(obj)
-    return ObjectCocoon(original_id, _spawn_by_original_id)
+    def epilogue(self):
+        for ctx in self._contexts.values():
+            ctx.spawn_epilog(self)
 
 
 def register_type_snapshot_by_id(
@@ -86,13 +127,6 @@ def register_type_snapshot_by_id(
     registry: Dict[Type, RegistryHook],
 ):
     registry[object_type] = snapshot_by_original_id
-
-
-class NullObjectType:
-    pass
-
-
-NullObject = NullObjectType()
 
 
 class ObjectCocoon:
@@ -105,11 +139,7 @@ class ObjectCocoon:
         self.spawn_method = spawn_method
 
 
-def create_snapshot(
-    registry: Dict[Type, RegistryHook],
-    objects: List[Any],
-    contexts: Dict,
-):
+def snapshot_objects(objects: List[Any], contexts: SnapshotContextManager):
     """
     Create snapshots of objects using the provided registry.
 
@@ -122,9 +152,8 @@ def create_snapshot(
         A new list of objects, where applicable objects are replaced with ObjectCocoon instances.
     """
     objects = objects.copy()
+    registry = contexts.registry()
     for idx, obj in enumerate(objects):
-        if isinstance(obj, Generator):
-            raise NotImplementedError("save generator type")
         obj_type = type(obj)
         if obj_type in registry:
             snapshot = registry[obj_type]
@@ -132,7 +161,7 @@ def create_snapshot(
     return objects
 
 
-def spawn_objects(objects: List[Any], contexts: Dict):
+def spawn_objects(objects: List[Any], contexts: SpawnContextManager):
     """
     Restore objects from their snapshots.
 
@@ -148,3 +177,28 @@ def spawn_objects(objects: List[Any], contexts: Dict):
         if isinstance(obj, ObjectCocoon):
             objects[idx] = obj.spawn_method(obj.states, contexts)
     return objects
+
+
+def _spawn_by_original_id(obj: int, mgr: SpawnContextManager):
+    return mgr.retrieve_object(obj)
+
+
+def snapshot_by_original_id(obj: Any, _mgr: SnapshotContextManager):
+    original_id = id(obj)
+    return ObjectCocoon(original_id, _spawn_by_original_id)
+
+
+def _spawn_none(_obj: Any, _mgr: SpawnContextManager):
+    return None
+
+
+def snapshot_as_none(_obj: Any, _mgr: SnapshotContextManager):
+    return ObjectCocoon(None, _spawn_none)
+
+
+def new_snapshot_registry():
+    return {
+        FrameType: snapshot_as_none,  # TODO: support frame types
+        SnapshotContextManager: snapshot_as_none,
+        SpawnContextManager: snapshot_as_none,
+    }

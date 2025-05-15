@@ -1,17 +1,39 @@
 import inspect
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import FrameType, FunctionType
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import dill
 
 from pyckpt import interpreter, objects
-from pyckpt.interpreter import ExceptionStates
+from pyckpt.interpreter import ExceptionStates, snapshot_generator
+from pyckpt.objects import SnapshotContextManager, SpawnContextManager
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 
 
-class LiveFrame:
+class LiveFrame(ABC):
+    def __init__(self):
+        super().__init__()
+        self._evaluated = False
+
+    @abstractmethod
+    def _evaluate(self): ...
+
+    @abstractmethod
+    def _cleanup(self): ...
+
+    def evaluate(self, ret_val: Any = None, exc_states: Any = None):
+        if self._evaluated:
+            raise ValueError(f"frame {self} already evaluated")
+        self._evaluated = True
+        ret = self._evaluate(ret_val, exc_states)
+        self._cleanup()
+        return ret
+
+
+class LiveFunctionFrame(LiveFrame):
     def __init__(
         self,
         *,
@@ -21,19 +43,17 @@ class LiveFrame:
         nlocals: List[Any],
         stack: List[Any],
     ):
-        self._evaluated = False
+        super().__init__()
         self.is_leaf = is_leaf
         self.func = func
         self.stack = stack
         self.nlocals = nlocals
         self.prev_instr_offset = prev_instr_offset
 
-    def evaluate(
-        self, ret_val=None, exc_states: Optional[ExceptionStates] = None
+    def _evaluate(
+        self, ret_val, exc_states: Optional[ExceptionStates]
     ) -> Tuple[Any, Optional[ExceptionStates]]:
         ret = None
-        if self._evaluated:
-            raise RuntimeError("evaluate frame that is already evaluated.")
         ret = interpreter.eval_frame_at_lasti(
             self.func,
             self.nlocals,
@@ -43,11 +63,32 @@ class LiveFrame:
             self.prev_instr_offset,
             exc_states,
         )
-        # remove local variables
-        del self.nlocals
-        del self.stack
-        self._evaluated = True
         return ret
+
+    def _cleanup(self):
+        del self.is_leaf
+        del self.func
+        del self.prev_instr_offset
+        del self.stack
+        del self.nlocals
+
+
+class LiveGeneratorFrame(LiveFrame):
+    def __init__(self, generator: Generator, is_leaf: bool):
+        super().__init__()
+        self._gen = generator
+        self._is_leaf = is_leaf
+
+    def _evaluate(
+        self, ret_val, exc_states: Optional[ExceptionStates]
+    ) -> Tuple[Any, Optional[ExceptionStates]]:
+        return interpreter.resume_generator(
+            self._gen, self._is_leaf, ret_val, exc_states
+        )
+
+    def _cleanup(self):
+        del self._gen
+        del self._is_leaf
 
 
 @dataclass(frozen=True)
@@ -57,35 +98,62 @@ class FrameCocoon:
     stack: bytes
     nlocals: bytes
     prev_instr_offset: int
+    generator: Optional[Dict]
+    gen_original_id: Optional[int]
 
     @staticmethod
-    def from_frame(
+    def snapshot_from_frame(
         frame: FrameType,
         is_leaf: bool,
         stack_analyzer: Analyzer,
-        stub_registry: Dict,
-        contexts: Dict,
+        contexts: SnapshotContextManager,
     ):
         captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
-        nlocals = objects.create_snapshot(stub_registry, captured["nlocals"], contexts)
-        stack = objects.create_snapshot(stub_registry, captured["stack"], contexts)
-        captured["nlocals"] = nlocals
-        captured["stack"] = stack
-        if captured["generator"] is not None:
-            raise NotImplementedError("snapshot generator is not implemented")
-        del captured["generator"]
-        return FrameCocoon(**captured)
+        nlocals = objects.snapshot_objects(captured["nlocals"], contexts)
+        stack = objects.snapshot_objects(captured["stack"], contexts)
+        generator = captured["generator"]
+        gen_original_id = None
+        if generator is not None:
+            gen_original_id = id(generator)
+            generator = snapshot_generator(generator)
+        return FrameCocoon(
+            is_leaf=is_leaf,
+            func=captured["func"],
+            nlocals=nlocals,
+            stack=stack,
+            prev_instr_offset=captured["prev_instr_offset"],
+            generator=generator,
+            gen_original_id=gen_original_id,
+        )
 
-    def spawn(self, contexts: Dict) -> LiveFrame:
+    def _spawn_generator(
+        self, nlocals: List, stack: List, spawn_ctxs: SpawnContextManager
+    ) -> LiveGeneratorFrame:
+        gen = spawn_ctxs.retrieve_object(self.gen_original_id)
+        interpreter.setup_generator(
+            gen,
+            self.generator,
+            {
+                "func": self.func,
+                "prev_instr_offset": self.prev_instr_offset,
+                "nlocals": nlocals,
+                "stack": stack,
+            },
+        )
+        return LiveGeneratorFrame(gen, self.is_leaf)
+
+    def spawn(self, contexts: SpawnContextManager) -> LiveFrame:
         nlocals = objects.spawn_objects(self.nlocals, contexts)
         stack = objects.spawn_objects(self.stack, contexts)
-        return LiveFrame(
-            func=self.func,
-            is_leaf=self.is_leaf,
-            stack=stack,
-            nlocals=nlocals,
-            prev_instr_offset=self.prev_instr_offset,
-        )
+        if self.generator is None:
+            return LiveFunctionFrame(
+                func=self.func,
+                is_leaf=self.is_leaf,
+                stack=stack,
+                nlocals=nlocals,
+                prev_instr_offset=self.prev_instr_offset,
+            )
+        return self._spawn_generator(nlocals, stack, contexts)
 
     def clone(self) -> "FrameCocoon":
         return dill.copy(self)
