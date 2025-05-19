@@ -303,7 +303,6 @@ def test_spawn_with_function_frame():
         nlocals=[3, 4],
         prev_instr_offset=-1,
         generator=None,
-        gen_original_id=None,
     )
 
     # Spawn a LiveFunctionFrame from the cocoon

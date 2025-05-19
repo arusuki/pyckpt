@@ -8,7 +8,7 @@ import dill
 
 from pyckpt import interpreter, objects
 from pyckpt.interpreter import ExceptionStates, snapshot_generator
-from pyckpt.objects import SnapshotContextManager, SpawnContextManager
+from pyckpt.objects import SpawnContextManager
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 
@@ -99,22 +99,19 @@ class FrameCocoon:
     nlocals: bytes
     prev_instr_offset: int
     generator: Optional[Dict]
-    gen_original_id: Optional[int]
 
     @staticmethod
     def snapshot_from_frame(
         frame: FrameType,
         is_leaf: bool,
         stack_analyzer: Analyzer,
-        contexts: SnapshotContextManager,
+        contexts: Dict,
     ):
         captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
         nlocals = objects.snapshot_objects(captured["nlocals"], contexts)
         stack = objects.snapshot_objects(captured["stack"], contexts)
         generator = captured["generator"]
-        gen_original_id = None
         if generator is not None:
-            gen_original_id = id(generator)
             generator = snapshot_generator(generator)
         return FrameCocoon(
             is_leaf=is_leaf,
@@ -123,15 +120,10 @@ class FrameCocoon:
             stack=stack,
             prev_instr_offset=captured["prev_instr_offset"],
             generator=generator,
-            gen_original_id=gen_original_id,
         )
 
-    def _spawn_generator(
-        self, nlocals: List, stack: List, spawn_ctxs: SpawnContextManager
-    ) -> LiveGeneratorFrame:
-        gen = spawn_ctxs.retrieve_object(self.gen_original_id)
-        interpreter.setup_generator(
-            gen,
+    def _spawn_generator(self, nlocals: List, stack: List) -> LiveGeneratorFrame:
+        gen = interpreter.make_generator(
             self.generator,
             {
                 "func": self.func,
@@ -153,7 +145,7 @@ class FrameCocoon:
                 nlocals=nlocals,
                 prev_instr_offset=self.prev_instr_offset,
             )
-        return self._spawn_generator(nlocals, stack, contexts)
+        return self._spawn_generator(nlocals, stack)
 
     def clone(self) -> "FrameCocoon":
         return dill.copy(self)
