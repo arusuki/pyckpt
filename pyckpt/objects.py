@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from types import FrameType, NoneType
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 
-from attr import dataclass
+from dataclasses import dataclass
 
 SnapshotMethod = Callable[[Any, "SnapshotContextManager"], "ObjectCocoon"]
 SpawnMethod = Callable[[Any, "SpawnContextManager"], Any]

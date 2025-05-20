@@ -54,7 +54,7 @@ class LiveThread:
         interpreter.restore_thread_state(self._states)
 
         ret, exc_states = leaf_frame.evaluate()
-        for frame in reversed(non_leaf_frames):
+        for frame in non_leaf_frames:
             ret, exc_states = frame.evaluate(ret, exc_states)
         if exc_states is not None:
             # FIXME:
@@ -108,6 +108,7 @@ class ThreadCocoon:
     leaf_frame: FrameCocoon
     non_leaf_frames: List[FrameCocoon]
     thread_states: Dict
+    _evaluated: bool = False
 
     @dataclass
     class ThreadStub:
@@ -160,6 +161,13 @@ class ThreadCocoon:
         return ThreadCocoon(t.ident, last_frame, non_leaf_frames, thread_state)
 
     def spawn(self, contexts: SpawnContextManager) -> LiveThread:
+        if self._evaluated == True:
+            del self.leaf_frame
+            del self.non_leaf_frames
+            del self.thread_states
+            raise NotImplementedError("This ThreadCocoon has spawned.")
+        self._evaluated = True
+
         live_thread = LiveThread(
             self.thread_id,
             self.leaf_frame,
