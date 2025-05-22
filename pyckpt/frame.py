@@ -1,14 +1,11 @@
-import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import FrameType, FunctionType
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
-import dill
-
 from pyckpt import interpreter, objects
-from pyckpt.interpreter import ExceptionStates, snapshot_generator
-from pyckpt.objects import SpawnContextManager
+from pyckpt.interpreter import ExceptionStates
+from pyckpt.interpreter.frame import get_generator
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 
@@ -92,73 +89,55 @@ class LiveGeneratorFrame(LiveFrame):
 
 
 @dataclass(frozen=True)
-class FrameCocoon:
+class FunctionFrameCocoon:
     is_leaf: bool
     func: Callable
     stack: bytes
     nlocals: bytes
     prev_instr_offset: int
-    generator: Optional[Dict]
 
-    @staticmethod
-    def snapshot_from_frame(
-        frame: FrameType,
-        is_leaf: bool,
-        stack_analyzer: Analyzer,
-        contexts: Dict,
-    ):
-        captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
-        nlocals = objects.snapshot_objects(captured["nlocals"], contexts)
-        stack = objects.snapshot_objects(captured["stack"], contexts)
-        generator = captured["generator"]
-        if generator is not None:
-            generator = snapshot_generator(generator)
-        return FrameCocoon(
-            is_leaf=is_leaf,
-            func=captured["func"],
-            nlocals=nlocals,
-            stack=stack,
-            prev_instr_offset=captured["prev_instr_offset"],
-            generator=generator,
+    def spawn(self) -> LiveFrame:
+        return LiveFunctionFrame(
+            func=self.func,
+            is_leaf=self.is_leaf,
+            stack=self.stack,
+            nlocals=self.nlocals,
+            prev_instr_offset=self.prev_instr_offset,
         )
 
-    def _spawn_generator(self, nlocals: List, stack: List) -> LiveGeneratorFrame:
-        gen = interpreter.make_generator(
-            self.generator,
-            {
-                "func": self.func,
-                "prev_instr_offset": self.prev_instr_offset,
-                "nlocals": nlocals,
-                "stack": stack,
-            },
+    def clone(self) -> Tuple["FunctionFrameCocoon", Dict]:
+        return objects.copy(self)
+
+
+@dataclass(frozen=True)
+class GeneratorFrameCocoon:
+    gen: Generator
+    is_leaf: bool
+
+    def spawn(self):
+        return LiveGeneratorFrame(
+            self.gen,
+            self.is_leaf,
         )
-        return LiveGeneratorFrame(gen, self.is_leaf)
 
-    def spawn(self, contexts: SpawnContextManager) -> LiveFrame:
-        nlocals = objects.spawn_objects(self.nlocals, contexts)
-        stack = objects.spawn_objects(self.stack, contexts)
-        if self.generator is None:
-            return LiveFunctionFrame(
-                func=self.func,
-                is_leaf=self.is_leaf,
-                stack=stack,
-                nlocals=nlocals,
-                prev_instr_offset=self.prev_instr_offset,
-            )
-        return self._spawn_generator(nlocals, stack)
-
-    def clone(self) -> "FrameCocoon":
-        return dill.copy(self)
+    def clone(self):
+        return objects.copy(self)
 
 
-def capture(backtrace_level=0):
-    original_frame = inspect.currentframe()
-    current = original_frame
+def snapshot_from_frame(
+    frame: FrameType,
+    is_leaf: bool,
+    stack_analyzer: Analyzer,
+):
+    generator = get_generator(frame)
+    if generator:
+        return GeneratorFrameCocoon(generator, is_leaf)
 
-    for _ in range(backtrace_level + 1):  # skip current frame
-        current = current.f_back
-        if current is None:
-            raise ValueError(
-                f"invalid backtrace level{backtrace_level}with frame Object {original_frame}"
-            )
-    return current
+    captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
+    return FunctionFrameCocoon(
+        is_leaf=is_leaf,
+        func=captured["func"],
+        nlocals=captured["nlocals"],
+        stack=captured["stack"],
+        prev_instr_offset=captured["prev_instr_offset"],
+    )

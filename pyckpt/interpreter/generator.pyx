@@ -126,6 +126,7 @@ cdef object _setup_generator(PyGenObject* gen, object gen_states, object frame_s
 
     exception = gen_states["exception"]
     if exception is not NullObject:
+        assert isinstance(exception, Exception), f"invalid generator exception: {exception}"
         gen.gi_exc_state.exc_value = <PyObject*> (exception)
         Py_INCREF(exception)
 

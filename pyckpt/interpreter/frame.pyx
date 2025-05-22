@@ -19,7 +19,11 @@ import inspect
 import logging
 import sys
 
-class NullObjectType: ...
+class NullObjectType:
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        raise NotImplementedError("pickle NullObjectType is not allowed")
+
 NullObject = NullObjectType()
 
 cdef extern from "Python.h":
@@ -211,7 +215,7 @@ cdef int _check_generator(_PyInterpreterFrame* frame):
 def get_generator(frame: FrameType):
     cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*> frame)
     if _check_generator(_frame) <= 0:
-        raise ValueError(f"frame not supported: {frame}")
+        return None
     gen = <object> generator_of(_frame)
     Py_INCREF(gen)
     return <object> gen
@@ -263,7 +267,6 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
         ],
         "prev_instr_offset": instr_offset,
         "is_leaf": is_leaf,
-        "generator": generator
     }
     for obj in chain(captured["nlocals"], captured["stack"]):
         if obj is not NullObject:
