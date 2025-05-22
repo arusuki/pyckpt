@@ -1,168 +1,102 @@
-from unittest.mock import Mock
+import io
+from typing import Any
 
-from pyckpt import objects
+import dill
+import pytest
+
 from pyckpt.objects import (
-    CheckpointRestoreContext,
-    CRContextCocoon,
-    SnapshotContextManager,
+    None_PID,
+    ObjectSnapshotManager,
+    ObjectStates,
+    Unpickler,
+    dump,
+    load,
+    snapshot_as_none,
 )
 
 
-def test_snapshot_objects():
-    objs = [1, "2", [3]]
-    ctxs = SnapshotContextManager()
-    ret = objects.snapshot_objects(objs, ctxs)
-
-    for o1, o2 in zip(objs, ret):
-        assert o1 is o2
+class _CapturedDict(dict):
+    pass
 
 
-def test_stub_objects():
-    def spawn_int2str(a: int, _):
-        return f"{a}"
+class DummyObjectSnapshotManager(ObjectSnapshotManager):
+    def setup_object(self, obj: Any, state: Any):
+        obj["state"] = state
 
-    def snapshot_str2int(s: str, _):
-        return objects.ObjectCocoon(int(s), spawn_int2str)
+    def snapshot_object(self, obj: Any) -> Any:
+        return obj.get("state", None)
 
-    reg = {str: (snapshot_str2int)}
+    def make_new_object(self) -> Any:
+        return {}
 
-    objs = ["1", "2", "3"]
-
-    ctxs = SnapshotContextManager(registry=reg)
-    ret = objects.snapshot_objects(objs, ctxs)
-
-    for o1, o2 in zip(objs, ret):
-        assert isinstance(o2, objects.ObjectCocoon)
-        assert isinstance(o2.states, int)
-        assert int(o1) == o2.states
-
-    rec = objects.spawn_objects(ret, {})
-
-    for o1, o2 in zip(objs, rec):
-        assert o1 == o2
+    def get_snapshot_type(self):
+        return _CapturedDict
 
 
-def test_snapshot_by_original_id():
-    obj = [1, 2, 3]
+def test_snapshot_and_restore():
+    manager = DummyObjectSnapshotManager()
+    obj = _CapturedDict()
+    obj["state"] = "test_state"
+    states = ObjectStates()
+    states.make_state_for_mgr(DummyObjectSnapshotManager)
 
-    snapshot = objects.snapshot_by_original_id(obj, None)
-    assert isinstance(snapshot, objects.ObjectCocoon)
-    assert snapshot.states == id(obj)
+    # Snapshot the object
+    object_id = manager._snapshot(obj, states)
+    assert object_id in manager.get_object_ids()
+    assert states.get_state_for_mgr(type(manager))[object_id] == "test_state"
 
-    spawn_context = objects.SpawnContextManager()
-    spawn_context.register_object(id(obj), obj)
-
-    restored_obj = snapshot.spawn_method(snapshot.states, spawn_context)
-    assert restored_obj is obj
-
-
-def test_spawn_context_manager_retrieve_object():
-    obj = [1, 2, 3]
-    obj_id = id(obj)
-
-    spawn_context = objects.SpawnContextManager()
-    spawn_context.register_object(obj_id, obj)
-
-    retrieved_obj = spawn_context.retrieve_object(obj_id)
-    assert retrieved_obj is obj
-
-    try:
-        spawn_context.retrieve_object(99999)
-    except ValueError as e:
-        assert str(e) == "Object with original ID 99999 not found in the object pool"
+    # Restore the object
+    new_obj = manager.make_new_object()
+    manager.setup_object(new_obj, "test_state")
+    assert new_obj["state"] == "test_state"
 
 
-def test_spawn_by_original_id():
-    obj = [1, 2, 3]
-    obj_id = id(obj)
+def test_dump_and_load():
+    manager = DummyObjectSnapshotManager()
+    obj = _CapturedDict()
+    obj["state"] = "test_state"
+    managers = [manager]
 
-    spawn_context = objects.SpawnContextManager()
-    spawn_context.register_object(obj_id, obj)
+    # Serialize the object
+    buffer = io.BytesIO()
+    dump(buffer, obj, managers)
 
-    cocoon = objects.snapshot_by_original_id(obj, None)
-    restored_obj = cocoon.spawn_method(cocoon.states, spawn_context)
-
-    assert restored_obj is obj
-
-
-def test_create_snapshot_with_registry():
-    def spawn_list(length, _):
-        return [None] * length
-
-    def snapshot_list(lst, _):
-        return objects.ObjectCocoon(len(lst), spawn_list)
-
-    objs = [[1, 2, 3], [4, 5], [6]]
-
-    registry = {list: (snapshot_list)}
-    ctxs = SnapshotContextManager(registry=registry)
-    snapshots = objects.snapshot_objects(objs, ctxs)
-
-    for original, snapshot in zip(objs, snapshots):
-        assert isinstance(snapshot, objects.ObjectCocoon)
-        assert snapshot.states == len(original)
-
-    restored_objs = objects.spawn_objects(snapshots, {})
-    for original, restored in zip(objs, restored_objs):
-        assert len(original) == len(restored)
-        assert all(item is None for item in restored)
+    # Deserialize the object
+    buffer.seek(0)
+    loaded_obj = load(buffer, managers)
+    assert loaded_obj["state"] == "test_state"
 
 
-def _create_cr_context_mock(states=None):
-    mock_context = Mock(spec=CheckpointRestoreContext)
+def test_make_and_get_state_for_mgr():
+    states = ObjectStates()
+    manager_type = DummyObjectSnapshotManager
 
-    def snapshot_behavior(snapshot_ctxs):
-        return CRContextCocoon(spawn_method=lambda states: mock_context, states=states)
+    # Create a state for the manager
+    states.make_state_for_mgr(manager_type)
+    assert manager_type in states._states
 
-    mock_context.snapshot.side_effect = snapshot_behavior
-    return mock_context
+    # Retrieve the state for the manager
+    state = states.get_state_for_mgr(manager_type)
+    assert state == {}
 
-
-def test_snapshot_context_manager_snapshot_contexts():
-    s = "hello"
-    mock_context = _create_cr_context_mock(s)
-    snapshot_manager = objects.SnapshotContextManager(
-        {type(mock_context): mock_context}
-    )
-
-    snapshots = snapshot_manager.snapshot_contexts()
-    assert len(snapshots) == 1
-    assert isinstance(snapshots[0], objects.CRContextCocoon)
-    assert snapshots[0].states is s
+    # Attempt to create a duplicate state for the manager
+    with pytest.raises(ValueError):
+        states.make_state_for_mgr(manager_type)
 
 
-def test_spawn_context_manager_build_from_context_snapshot():
-    mock_context = _create_cr_context_mock()
-    snapshot_manager = objects.SnapshotContextManager(
-        {type(mock_context): mock_context}
-    )
-    snapshots = snapshot_manager.snapshot_contexts()
-    spawn_manager = objects.SpawnContextManager.build_from_context_snapshot(snapshots)
-
-    assert isinstance(spawn_manager, objects.SpawnContextManager)
-    assert type(mock_context) in spawn_manager._contexts
-    mock_context.spawn.assert_called_once_with(spawn_manager)
+def test_snapshot_as_none():
+    states = ObjectStates()
+    result = snapshot_as_none({}, states)
+    assert result == None_PID
 
 
-def test_spawn_context_manager_register_and_retrieve_object():
-    obj = [1, 2, 3]
-    obj_id = id(obj)
+def test_unpickler_persist_none():
+    class NonePickler(dill.Pickler):
+        def persistent_id(self, obj):
+            return 0
 
-    spawn_manager = objects.SpawnContextManager()
-    spawn_manager.register_object(obj_id, obj)
+    buffer = io.BytesIO()
+    NonePickler(file=buffer).dump({})
 
-    retrieved_obj = spawn_manager.retrieve_object(obj_id)
-    assert retrieved_obj is obj
-
-    try:
-        spawn_manager.retrieve_object(99999)
-    except ValueError as e:
-        assert str(e) == "Object with original ID 99999 not found in the object pool"
-
-
-def test_spawn_context_manager_epilogue():
-    mock_context = _create_cr_context_mock()
-    spawn_manager = objects.SpawnContextManager({type(mock_context): mock_context})
-    spawn_manager.epilogue()
-
-    mock_context.spawn_epilog.assert_called_once()
+    buffer.seek(0)
+    assert Unpickler(file=buffer, objects={}).load() is None

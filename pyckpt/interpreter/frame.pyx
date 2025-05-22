@@ -211,7 +211,7 @@ cdef int _check_generator(_PyInterpreterFrame* frame):
 def get_generator(frame: FrameType):
     cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*> frame)
     if _check_generator(_frame) <= 0:
-        raise ValueError(f"frame not supported: {frame}")
+        return None
     gen = <object> generator_of(_frame)
     Py_INCREF(gen)
     return <object> gen

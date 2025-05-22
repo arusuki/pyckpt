@@ -6,9 +6,8 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import dill
 
-from pyckpt import interpreter, objects
+from pyckpt import interpreter
 from pyckpt.interpreter import ExceptionStates, snapshot_generator
-from pyckpt.objects import SpawnContextManager
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 
@@ -105,19 +104,16 @@ class FrameCocoon:
         frame: FrameType,
         is_leaf: bool,
         stack_analyzer: Analyzer,
-        contexts: Dict,
     ):
         captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
-        nlocals = objects.snapshot_objects(captured["nlocals"], contexts)
-        stack = objects.snapshot_objects(captured["stack"], contexts)
         generator = captured["generator"]
         if generator is not None:
             generator = snapshot_generator(generator)
         return FrameCocoon(
             is_leaf=is_leaf,
             func=captured["func"],
-            nlocals=nlocals,
-            stack=stack,
+            nlocals=captured["nlocals"],
+            stack=captured["stack"],
             prev_instr_offset=captured["prev_instr_offset"],
             generator=generator,
         )
@@ -134,18 +130,16 @@ class FrameCocoon:
         )
         return LiveGeneratorFrame(gen, self.is_leaf)
 
-    def spawn(self, contexts: SpawnContextManager) -> LiveFrame:
-        nlocals = objects.spawn_objects(self.nlocals, contexts)
-        stack = objects.spawn_objects(self.stack, contexts)
+    def spawn(self) -> LiveFrame:
         if self.generator is None:
             return LiveFunctionFrame(
                 func=self.func,
                 is_leaf=self.is_leaf,
-                stack=stack,
-                nlocals=nlocals,
+                stack=self.stack,
+                nlocals=self.nlocals,
                 prev_instr_offset=self.prev_instr_offset,
             )
-        return self._spawn_generator(nlocals, stack)
+        return self._spawn_generator(self.nlocals, self.stack)
 
     def clone(self) -> "FrameCocoon":
         return dill.copy(self)

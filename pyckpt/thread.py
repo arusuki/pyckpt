@@ -3,7 +3,7 @@ import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import dill
 
@@ -12,8 +12,6 @@ from pyckpt.analyzer import analyze_stack_top
 from pyckpt.frame import FrameCocoon
 from pyckpt.objects import (
     CheckpointRestoreContext,
-    CRContextCocoon,
-    ObjectCocoon,
     SnapshotContextManager,
     SpawnContextManager,
 )
@@ -79,21 +77,10 @@ def spawn_thread(original_id: int, mgr: SpawnContextManager):
     return mgr.retrieve_object(original_id)
 
 
-def snapshot_thread(t: Thread, _mgr: Any):
-    original_id = t.ident
-    return ObjectCocoon(original_id, spawn_thread)
-
-
 class ThreadContext(CheckpointRestoreContext):
     @staticmethod
     def spawn_method(_states):
         return ThreadContext()
-
-    def snapshot(self, snapshot_ctxs: "SnapshotContextManager") -> "CRContextCocoon":
-        return CRContextCocoon(ThreadContext.spawn_method, None)
-
-    def register_snapshot_method(self, snapshot_ctxs: "SnapshotContextManager"):
-        snapshot_ctxs.register_snapshot_method(Thread, snapshot_thread)
 
     def spawn(self, spawn_ctxs: "SpawnContextManager") -> "CheckpointRestoreContext":
         return
