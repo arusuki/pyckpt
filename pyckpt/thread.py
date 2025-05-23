@@ -54,7 +54,7 @@ class LiveThread:
         interpreter.restore_thread_state(self._states)
 
         ret, exc_states = leaf_frame.evaluate()
-        for frame in reversed(non_leaf_frames):
+        for frame in non_leaf_frames:
             ret, exc_states = frame.evaluate(ret, exc_states)
         if exc_states is not None:
             # FIXME:

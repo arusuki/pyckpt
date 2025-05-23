@@ -109,7 +109,7 @@ cdef void init_locals_and_stack(
     frame.stacktop = co_nlocalsplus + len(stack)
 
 
-def _fetch_exception() -> ExceptionStates:
+def fetch_exception() -> ExceptionStates:
     cdef PyObject* p_type  = NULL
     cdef PyObject* p_value = NULL
     cdef PyObject* p_traceback = NULL
@@ -149,7 +149,7 @@ def eval_frame_at_lasti(
     do_exc = 0
     if exc_states is not None:
         if PyErr_Occurred() != NULL:
-            _, exc_prev, _ = _fetch_exception()
+            _, exc_prev, _ = fetch_exception()
             PyErr_Clear()
             raise RuntimeError("eval a frame when exception has been raised")\
                 from exc_prev
@@ -157,7 +157,7 @@ def eval_frame_at_lasti(
         do_exc = 1
     cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
     if result == NULL:
-        exc_states = _fetch_exception()
+        exc_states = fetch_exception()
         return None, exc_states
     free(frame)
     return <object> result, None
