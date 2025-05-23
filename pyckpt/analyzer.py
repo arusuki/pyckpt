@@ -32,7 +32,7 @@ FINAL_RERAISE_BLOCK = -1
 
 
 def _visit_block(
-    visit_stack: List[BasicBlock],
+    visit_stack: List[Tuple[BasicBlock, int]],
     seen: Dict[int, int],
     next_block: BasicBlock,
     stack_size_after: int,

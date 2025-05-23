@@ -81,3 +81,58 @@ def test_thread_capture_with_exception(capsys):
 
     result = capsys.readouterr()
     assert result.out.count(s) == 1
+
+
+def test_thread_multiple_captures(capsys):
+    c: Optional[ThreadCocoon] = None
+    ctx_states: Optional[List[CRContextCocoon]] = None
+
+    s = "hello_world"
+    multi_capture: bool = False
+
+    def test():
+        nonlocal c, ctx_states
+
+        snapshot_ctxs = SnapshotContextManager()
+        thread_ctx = ThreadContext()
+        snapshot_ctxs.register_context(thread_ctx)
+        thread_cocoon = ThreadCocoon.snapshot_from_thread(
+            threading.current_thread(), snapshot_ctxs
+        )
+        if thread_cocoon is not None:
+            ctx_states = snapshot_ctxs.snapshot_contexts()
+            c = thread_cocoon.clone()
+        if multi_capture:
+            new_snapshot_ctxs = SnapshotContextManager()
+            new_thread_ctx = ThreadContext()
+            new_snapshot_ctxs.register_context(new_thread_ctx)
+            new_thread_cocoon = ThreadCocoon.snapshot_from_thread(
+                threading.current_thread(), new_snapshot_ctxs
+            )
+            if new_thread_cocoon is not None:
+                ctx_states = new_snapshot_ctxs.snapshot_contexts()
+                c = new_thread_cocoon.clone()
+
+        print(s)
+
+    t = threading.Thread(target=test)
+    t.start()
+    t.join()
+
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+    assert isinstance(c, ThreadCocoon)
+    assert isinstance(ctx_states, List)
+
+    spawn_ctxs = SpawnContextManager.build_from_context_snapshot(ctx_states)
+    live_thread: LiveThread = c.spawn(spawn_ctxs)
+    multi_capture = True
+    live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+
+    new_spawn_ctxs = SpawnContextManager.build_from_context_snapshot(ctx_states)
+    new_live_thread: LiveThread = c.spawn(spawn_ctxs)
+    new_live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
