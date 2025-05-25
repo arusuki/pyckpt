@@ -47,7 +47,7 @@ def test_raise_exception():
         [],
         True,
     )
-    assert ret is None
+    assert ret is NullObject
     assert isinstance(exc_states, tuple)
     assert exc_states[1] is exc
 

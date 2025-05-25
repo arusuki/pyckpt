@@ -1,31 +1,21 @@
 import threading
-from typing import List, Optional
+from typing import Dict, Optional
 
-from pyckpt.objects import CRContextCocoon, SnapshotContextManager, SpawnContextManager
-from pyckpt.thread import LiveThread, ThreadCocoon, ThreadContext
+from pyckpt.thread import LiveThread, ThreadCocoon, snapshot_from_thread
 
 
 def test_thread_capture(capsys):
     c: Optional[ThreadCocoon] = None
-    ctx_states: Optional[List[CRContextCocoon]] = None
+    objs: Optional[Dict] = {}
 
     s = "hello_world"
 
     def test():
-        nonlocal ctx_states
         nonlocal c
 
-        snapshot_ctxs = SnapshotContextManager()
-        thread_ctx = ThreadContext()
-        snapshot_ctxs.register_context(thread_ctx)
-        thread_cocoon = ThreadCocoon.snapshot_from_thread(
-            threading.current_thread(), snapshot_ctxs
-        )
-
+        thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
-            ctx_states = snapshot_ctxs.snapshot_contexts()
-            c = thread_cocoon.clone()
-
+            c = thread_cocoon.clone(objs)
         print(s)
 
     t = threading.Thread(target=test)
@@ -35,10 +25,10 @@ def test_thread_capture(capsys):
     result = capsys.readouterr()
     assert result.out.count(s) == 1
     assert isinstance(c, ThreadCocoon)
-    assert isinstance(ctx_states, List)
+    assert isinstance(objs, Dict)
 
-    spawn_ctxs = SpawnContextManager.build_from_context_snapshot(ctx_states)
-    live_thread: LiveThread = c.spawn(spawn_ctxs)
+    assert id(t) in objs
+    live_thread: LiveThread = c.spawn(objs[id(t)])
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
     assert result.out.count(s) == 1
@@ -46,25 +36,19 @@ def test_thread_capture(capsys):
 
 def test_thread_capture_with_exception(capsys):
     c: Optional[ThreadCocoon] = None
-    ctx_states: Optional[List[CRContextCocoon]] = None
+    objs: Optional[Dict] = {}
 
     s = "hello_world"
 
     def test():
         nonlocal c
-        nonlocal ctx_states
-        contexts = SnapshotContextManager()
-        thread_ctx = ThreadContext()
-        contexts.register_context(thread_ctx)
+        nonlocal objs
         try:
             raise RuntimeError("test")
         except RuntimeError:
-            thread_cocoon = ThreadCocoon.snapshot_from_thread(
-                threading.current_thread(), contexts
-            )
+            thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
-            c = thread_cocoon.clone()
-            ctx_states = contexts.snapshot_contexts()
+            c = thread_cocoon.clone(objs)
         print(s)
 
     t = threading.Thread(target=test)
@@ -75,8 +59,7 @@ def test_thread_capture_with_exception(capsys):
     assert result.out.count(s) == 1
 
     assert c is not None
-    spawn_ctx = SpawnContextManager.build_from_context_snapshot(ctx_states)
-    live_thread: LiveThread = c.spawn(spawn_ctx)
+    live_thread: LiveThread = c.spawn(objs[c.thread_id])
     live_thread.evaluate(timeout=1.0)
 
     result = capsys.readouterr()

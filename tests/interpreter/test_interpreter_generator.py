@@ -66,7 +66,6 @@ def test_make_generator():
     for i, obj in enumerate(frame_states["nlocals"]):
         if isinstance(obj, FrameType):
             frame_states["nlocals"][i] = None
-    del frame_states["generator"]
     frame_states = dill.copy(frame_states)
     gen_new = _generator.make_generator(gen_states, frame_states)
     assert isinstance(gen_new, Generator)
@@ -245,3 +244,10 @@ def test_resume_with_exception():
     assert ret is _frame.NullObject
     assert exc is not None
     assert isinstance(exc[1], RuntimeError)
+
+
+def test_reduce_null_object_type():
+    obj = {"null": _frame.NullObject}
+
+    with pytest.raises(NotImplementedError):
+        dill.copy(obj)

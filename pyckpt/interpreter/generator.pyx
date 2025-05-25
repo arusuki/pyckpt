@@ -108,8 +108,9 @@ def snapshot_generator(generator: Generator):
 
 cpdef snapshot_generator_frame(object generator, object analyzer):
     cdef PyGenObject* gen = <PyGenObject*> generator
-    if gen.gi_frame_state != get_frame_suspended():
-        raise ValueError("snapshot non-suspended generator is not supported")
+    if gen.gi_frame_state != get_frame_suspended() \
+        and gen.gi_frame_state != get_frame_executing():
+        raise ValueError("snapshot non-(suspended|executing) generator is not supported")
     return _snapshot_frame(gen.gi_iframe, False, analyzer)
 
 cdef object _setup_generator(PyGenObject* gen, object gen_states, object frame_states):
@@ -126,6 +127,7 @@ cdef object _setup_generator(PyGenObject* gen, object gen_states, object frame_s
 
     exception = gen_states["exception"]
     if exception is not NullObject:
+        assert isinstance(exception, Exception), f"invalid generator exception: {exception}"
         gen.gi_exc_state.exc_value = <PyObject*> (exception)
         Py_INCREF(exception)
 
