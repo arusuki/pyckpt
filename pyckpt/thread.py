@@ -3,7 +3,7 @@ import threading
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from pyckpt import interpreter, objects, platform
 from pyckpt.analyzer import analyze_stack_top

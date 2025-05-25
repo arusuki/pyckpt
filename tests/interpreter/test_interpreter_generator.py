@@ -5,7 +5,6 @@ from typing import Generator
 import dill
 import pytest
 
-from pyckpt import objects
 from pyckpt.analyzer import analyze_stack_top
 from pyckpt.interpreter import frame as _frame
 from pyckpt.interpreter import generator as _generator

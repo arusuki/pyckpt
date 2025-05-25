@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import FrameType, FunctionType
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from typing import Any, Callable, Generator, List, Optional, Tuple
 
 from pyckpt import interpreter, objects
 from pyckpt.interpreter import ExceptionStates
@@ -105,7 +105,7 @@ class FunctionFrameCocoon:
             prev_instr_offset=self.prev_instr_offset,
         )
 
-    def clone(self) -> Tuple["FunctionFrameCocoon", Dict]:
+    def clone(self) -> "FunctionFrameCocoon":
         return objects.copy(self)
 
 

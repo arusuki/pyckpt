@@ -108,6 +108,7 @@ cdef void init_locals_and_stack(
             frame.localsplus[i] = NULL
     cdef PyObject** stack_base = <PyObject**> &frame.localsplus[co_nlocalsplus]
     for i, py_obj in enumerate(stack):
+        Py_INCREF(py_obj)
         obj = <PyObject*>py_obj
         stack_base[i] = obj
     frame.stacktop = co_nlocalsplus + len(stack)
@@ -162,7 +163,7 @@ def eval_frame_at_lasti(
     cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
     if result == NULL:
         exc_states = fetch_exception()
-        return None, exc_states
+        return NullObject, exc_states
     free(frame)
     return <object> result, None
 
@@ -269,8 +270,7 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
         "is_leaf": is_leaf,
     }
     for obj in chain(captured["nlocals"], captured["stack"]):
-        if obj is not NullObject:
-            Py_INCREF(obj)
+        Py_INCREF(obj)
     Py_INCREF(<object> func)
     Py_INCREF(generator)
     return captured

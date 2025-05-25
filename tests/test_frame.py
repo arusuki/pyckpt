@@ -2,6 +2,7 @@
 import inspect
 import threading
 from ast import FunctionType
+from contextlib import contextmanager
 from typing import Generator, Optional
 
 import pytest
@@ -15,6 +16,7 @@ from pyckpt.frame import (
     LiveGeneratorFrame,
     snapshot_from_frame,
 )
+from pyckpt.interpreter.frame import NullObject
 
 BIG_NUMBER = 0x3F3F3F3F
 
@@ -131,7 +133,7 @@ def test_raise_exception():
 
     def evaluate(new_frames):
         inner_ret, err = new_frames[1].spawn().evaluate()
-        assert inner_ret is None
+        assert inner_ret is NullObject
         assert isinstance(err, tuple)
 
         outer_ret, err = new_frames[0].spawn().evaluate(inner_ret)
@@ -241,6 +243,38 @@ def test_spawn_with_generator_frame():
         _ = live_frame._gen
     with pytest.raises(AttributeError):
         _ = live_frame._is_leaf
+
+
+@contextmanager
+def my_context_mgr():
+    yield "manager"
+    print("finished")
+
+
+def test_snapshot_with_context_manager(capsys):
+    def foo():
+        with my_context_mgr() as s:
+            frame_ = snapshot_from_frame(
+                inspect.currentframe(), False, analyzer.analyze_stack_top
+            )
+            if frame_:
+                new_frame_ = frame_.clone()
+                assert new_frame_.stack[0] is not frame_.stack[0]
+                return new_frame_
+            else:
+                return s
+
+    f = foo()
+    assert isinstance(f, FunctionFrameCocoon)
+    result = capsys.readouterr()
+    assert result.out.count("finished") == 1
+    print(f.stack)
+
+    ret, exc = f.spawn().evaluate()
+    assert ret == "manager"
+    assert exc is None
+    result = capsys.readouterr()
+    assert result.out.count("finished") == 1
 
 
 def test_spawn_with_function_frame():
