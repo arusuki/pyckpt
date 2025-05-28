@@ -92,8 +92,8 @@ class LiveGeneratorFrame(LiveFrame):
 class FunctionFrameCocoon:
     is_leaf: bool
     func: Callable
-    stack: bytes
-    nlocals: bytes
+    stack: List[Any]
+    nlocals: List[Any]
     prev_instr_offset: int
 
     def spawn(self) -> LiveFrame:
