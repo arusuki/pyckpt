@@ -1,30 +1,29 @@
 import threading
-from typing import Dict, Optional, Any, Type
-from dataclasses import dataclass
+from typing import Dict, Generic, Optional, TypeVar
+
 from pyckpt.thread import LiveThread, ThreadCocoon, snapshot_from_thread
 
+T = TypeVar("T")
 
-class SoleObjects:
-    _instance: Optional["SoleObjects"] = None
-    _original_id: Optional[int] = None
+
+class SingletonValue(Generic[T]):
+    _instance: Optional["SingletonValue"] = None
     _initialized: bool = False
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
-            cls._instance = super(SoleObjects, cls).__new__(cls)
-            cls._original_id = id(cls._instance)
+            cls._instance = super(SingletonValue, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, value: Any = None, value_type: Type = None):
-        if not SoleObjects._initialized:
+    def __init__(self, value: T):
+        if not SingletonValue._initialized:
             self._value = value
-            self._type = value_type
-            SoleObjects._initialized = True
+            SingletonValue._initialized = True
 
-    def set_value(self, new_value: Any):
+    def set_value(self, new_value: T):
         self._value = new_value
 
-    def get_value(self) -> Any:
+    def get_value(self) -> T:
         return self._value
 
 
@@ -93,8 +92,8 @@ def test_thread_capture_with_exception(capsys):
 def test_thread_multiple_captures(capsys):
     c: Optional[ThreadCocoon] = None
     objs: Optional[Dict] = {}
-    flag: bool = False
-    multi_capture: SoleObjects = SoleObjects(flag, type(flag))
+    flag = False
+    multi_capture = SingletonValue(flag)
 
     s = "hello_world"
     exc = "executed"
