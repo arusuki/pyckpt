@@ -102,17 +102,20 @@ class ThreadCocoon:
         )
         return live_thread
 
-    def clone(self, object_table: Dict) -> "ThreadCocoon":
+    def clone(
+        self, object_table: Dict, persist_mapping: Optional[Dict[Type, Mapping]] = None
+    ) -> "ThreadCocoon":
         def persist_thread(t: Thread):
             tid = id(t)
             if tid not in object_table:
                 object_table[tid] = object.__new__(Thread)
             return tid
 
+        pm = persist_mapping if persist_mapping else {}
+        pm.update({Thread: persist_thread})
         if self.thread_id not in object_table:
             object_table[self.thread_id] = object.__new__(Thread)
-        mapping = {Thread: persist_thread}
-        return objects.copy(self, objects=object_table, persist_mapping=mapping)
+        return objects.copy(self, objects=object_table, persist_mapping=pm)
 
 
 def snapshot_from_thread(t: Thread, max_frames: Optional[int] = None):
