@@ -1,5 +1,4 @@
 import sys
-from tkinter import W
 from typing import List
 
 from Cython.Build import cythonize
@@ -10,14 +9,6 @@ if DEBUGGABLE_OBJECT:
     import os
 
     os.environ["CFLAGS"] = "-g -O0"
-
-
-def platform_module() -> List[str]:
-    if sys.platform == "darwin":
-        return [
-            Extension("pyckpt.platform", ["pyckpt/platform/darwin.pyx"]),
-        ]
-    return []
 
 
 def interpreter_module() -> List[Extension]:
@@ -32,7 +23,6 @@ def interpreter_module() -> List[Extension]:
 
 
 cython_modules = []
-cython_modules += platform_module()
 cython_modules += interpreter_module()
 
 
