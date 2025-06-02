@@ -39,8 +39,29 @@ class SingletonValue(Generic[T]):
             self._value = value
             SingletonValue._initialized = True
 
-    def set_value(self, new_value: T):
-        self._value = new_value
+    def set_value(self, value: T):
+        self._value = value
+
+    def get_value(self) -> T:
+        return self._value
+
+
+class SingletonClass(Generic[T]):
+    _instance: Optional["SingletonClass"] = None
+    _initialized: bool = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(SingletonClass, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, value: T):
+        if not SingletonClass._initialized:
+            self._value = value
+            SingletonClass._initialized = True
+
+    def set_value(self, value: T):
+        self._value = value
 
     def get_value(self) -> T:
         return self._value
@@ -110,6 +131,7 @@ def test_thread_capture_with_exception(capsys):
 
 def test_thread_multiple_captures(capsys):
     c: Optional[ThreadCocoon] = None
+    sin_c = SingletonClass(c)
     objs: Optional[Dict] = {}
     flag = False
     multi_capture = SingletonValue(flag)
@@ -118,16 +140,18 @@ def test_thread_multiple_captures(capsys):
     exc = "executed"
 
     def test():
-        nonlocal c
+        nonlocal sin_c
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
-            c = thread_cocoon.clone(objs)
+            cocoon = thread_cocoon.clone(objs)
+            sin_c.set_value(cocoon)
 
         if multi_capture.get_value():
             _thread_cocoon = snapshot_from_thread(threading.current_thread())
             if _thread_cocoon is not None:
-                c = _thread_cocoon.clone(objs)
+                cocoon = _thread_cocoon.clone(objs)
+                sin_c.set_value(cocoon)
             print(exc)
 
         print(s)
@@ -138,16 +162,22 @@ def test_thread_multiple_captures(capsys):
 
     result = capsys.readouterr()
     assert result.out.count(s) == 1
-    assert isinstance(c, ThreadCocoon)
+    assert isinstance(sin_c.get_value(), ThreadCocoon)
     assert isinstance(objs, Dict)
 
     assert id(t) in objs
-    live_thread: LiveThread = c.spawn(objs[id(t)])
+    live_thread: LiveThread = sin_c.get_value().spawn(objs[id(t)])
     multi_capture.set_value(True)
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
     assert result.out.count(s) == 1
     assert result.out.count(exc) == 1
+
+    live_thread = sin_c.get_value().spawn(objs[id(live_thread.handle)])
+    multi_capture.set_value(False)
+    live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
 
 
 @contextmanager
