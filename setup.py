@@ -1,5 +1,5 @@
 import sys
-from typing import List
+from typing import List, Union
 
 from Cython.Build import cythonize
 from setuptools import Extension, setup
@@ -11,15 +11,15 @@ if DEBUGGABLE_OBJECT:
     os.environ["CFLAGS"] = "-g -O0"
 
 
-def interpreter_module() -> List[Extension]:
+def interpreter_module() -> List[Union[Extension, str]]:
     version = f"{sys.version_info.major}_{sys.version_info.minor}"
-    if version == "3_11":
-        return ["pyckpt/interpreter/frame.pyx", "pyckpt/interpreter/generator.pyx"]
-    else:
+    supported_versions = ("3_11",)
+    if version not in supported_versions:
         raise RuntimeError(
             f"unsupported CPython version:\
                 {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         )
+    return ["pyckpt/interpreter/frame.pyx", "pyckpt/interpreter/generator.pyx"]
 
 
 cython_modules = []

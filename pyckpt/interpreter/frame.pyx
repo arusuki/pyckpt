@@ -31,10 +31,13 @@ cdef extern from "Python.h":
     int CO_COROUTINE
     int CO_ASYNC_GENERATOR
     int WAIT_LOCK
+    int PyTrace_C_CALL
+    int PyTrace_CALL
 
     ctypedef int (*Py_tracefunc)(PyObject *, PyFrameObject *, int, PyObject *)
     cdef int PyThread_acquire_lock(PyThread_type_lock lock, int wait_flag)
     cdef void PyThread_release_lock(PyThread_type_lock lock)
+    cdef int _PyEval_SetProfile(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
     cdef int _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
 
 
@@ -141,6 +144,7 @@ def eval_frame_at_lasti(
     nlocals: List[Any],
     stack: List[Any],
     is_leaf: bool,
+    is_return: bool = False,
     ret_value: Any = None,
     prev_instr_offset = -1,
     exc_states: Optional[ExceptionStates] = None,
@@ -151,7 +155,7 @@ def eval_frame_at_lasti(
     cdef size_t size = code.co_nlocalsplus + code.co_stacksize + frame_specials_size();
     cdef _PyInterpreterFrame *frame = <_PyInterpreterFrame*> malloc(sizeof(PyObject*) * size)
 
-    if not is_leaf:
+    if not is_leaf and not is_return:
         stack.append(ret_value)
     _PyFrame_InitializeSpecials(
         frame,
@@ -188,7 +192,7 @@ def _offset_without_cache(
 
 
 # FIXME: these version-dependent functions should be placed separately.
-CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE']
+CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE']
 CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
 def is_call_instr(opcode: int):
     return opcode in CALL_CODES
@@ -250,6 +254,12 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
             code_array,
             instr_offset
         )
+
+    is_return = False
+    if code_array[fixed_instr_offset].opcode == dis.opmap["RETURN_VALUE"]:
+        fixed_instr_offset -= 1
+        is_return = True
+
     is_generator = _check_generator(frame)
     stacksize = analyzer(
         <object> func,
@@ -277,6 +287,7 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
         ],
         "prev_instr_offset": instr_offset,
         "is_leaf": is_leaf,
+        "is_return": is_return,
     }
     for obj in chain(captured["nlocals"], captured["stack"]):
         Py_INCREF(obj)
@@ -315,11 +326,16 @@ def restore_thread_state(state: Dict):
 
 
 cdef int trace_trampoline(PyObject *callback, PyFrameObject *frame, int what, PyObject *arg) noexcept:
-    (<object> callback)(<object> frame, what, <object> arg)
+    assert frame != NULL
+    (<object> callback)(
+        <object> frame,
+        what,
+        <object> arg if arg != NULL else NullObject,
+    )
     return 0
 
 
-def set_trace_all_threads(func: Optional[FunctionType]):
+def set_profile_all_threads(func: Optional[FunctionType]):
     cdef _PyRuntimeState* runtime = <_PyRuntimeState*> get_python_py_runtime()
     cdef PyThreadState* tstate
     if runtime == NULL:
@@ -330,5 +346,5 @@ def set_trace_all_threads(func: Optional[FunctionType]):
     PyThread_release_lock(runtime.interpreters.mutex)
 
     while tstate != NULL:
-        _PyEval_SetTrace(tstate, trace_trampoline, <PyObject*> func)
+        _PyEval_SetProfile(tstate, trace_trampoline, <PyObject*> func)
         tstate = PyThreadState_Next(tstate)

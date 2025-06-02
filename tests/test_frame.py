@@ -284,6 +284,7 @@ def test_spawn_with_function_frame():
     # Create a snapshot of the function frame
     cocoon = FunctionFrameCocoon(
         is_leaf=True,
+        is_return=False,
         func=test_function,
         stack=[],
         nlocals=[3, 4],

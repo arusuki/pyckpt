@@ -2,7 +2,7 @@
 import dis
 import inspect
 from types import FrameType
-from typing import Generator
+from typing import Generator, Optional
 
 import pytest
 from bytecode import Bytecode, Instr
@@ -33,6 +33,24 @@ def test_eval_one_arg():
         [],
         True,
     )
+
+
+def test_eval_return():
+    def foo():
+        return "41"
+
+    ins = dis.get_instructions(foo, show_caches=True)
+    offset: Optional[int] = None
+    RETURN_VALUE = dis.opmap["RETURN_VALUE"]
+    for off, i in enumerate(ins):
+        if i.opcode == RETURN_VALUE:
+            offset = off
+    assert offset
+    ret, exc = _frame.eval_frame_at_lasti(
+        foo, [], ["42"], True, is_return=True, prev_instr_offset=offset - 1
+    )
+    assert exc is None
+    assert ret == "42"
 
 
 def test_raise_exception():

@@ -175,7 +175,10 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
 
-pyckpt/**/*.c
+pyckpt/*/*.c
+!pyckpt/**/csrc/**
 
 .vscode
 .cspell
+
+compile_commands.json
