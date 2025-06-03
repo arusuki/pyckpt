@@ -1,7 +1,7 @@
 # cython: embedsignature=True, embedsignature.format=python
 
 from types import CodeType, FrameType, FunctionType, TracebackType
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type, NamedTuple
 from libc.stdlib cimport malloc, free
 from cpython.ref cimport PyObject, Py_INCREF
 from threading import Thread
@@ -18,6 +18,7 @@ import dis
 import inspect
 import logging
 import sys
+import bytecode
 
 class NullObjectType:
 
@@ -141,6 +142,10 @@ def fetch_exception() -> ExceptionStates:
 def restore_exception(states: ExceptionStates):
     PyErr_Restore(<PyObject*> states[0], <PyObject*> states[1], <PyObject*> states[2])
 
+class EvaluateResult(NamedTuple):
+    ret: Any
+    exception_states: Optional[ExceptionStates]
+
 
 def eval_frame_at_lasti(
     func_obj: FunctionType,
@@ -151,7 +156,7 @@ def eval_frame_at_lasti(
     ret_value: Any = None,
     prev_instr_offset = -1,
     exc_states: Optional[ExceptionStates] = None,
-) -> Tuple[Any, Optional[ExceptionStates]]:
+) -> EvaluateResult:
     cdef PyFunctionObject* func = <PyFunctionObject*>func_obj
     cdef PyThreadState* state = PyThreadState_GET()
     cdef PyCodeObject * code = <PyCodeObject*> func.func_code;
@@ -178,11 +183,11 @@ def eval_frame_at_lasti(
         restore_exception(exc_states)
         do_exc = 1
     cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
+    free(frame)
     if result == NULL:
         exc_states = fetch_exception()
-        return NullObject, exc_states
-    free(frame)
-    return <object> result, None
+        return EvaluateResult(NullObject, exc_states)
+    return EvaluateResult(<object> result, None)
 
 def _offset_without_cache(
     code_array: List[dis.Instruction],
@@ -259,9 +264,15 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
         )
 
     is_return = False
-    if code_array[fixed_instr_offset].opcode == dis.opmap["RETURN_VALUE"]:
-        fixed_instr_offset -= 1
+    if code_array[instr_offset].opcode == dis.opmap["RETURN_VALUE"]:
+        instr_offset -= 1
         is_return = True
+
+    CALL = dis.opmap["CALL"]
+
+    orig_instr = instr_offset
+    if code_array[instr_offset].opcode == CALL:
+        instr_offset += bytecode.ConcreteInstr("CALL", 0).use_cache_opcodes()
 
     is_generator = _check_generator(frame)
     stacksize = analyzer(
@@ -276,6 +287,7 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
     if is_generator > 0:
         generator = <object> generator_of(frame)
         Py_INCREF(generator)
+
     captured = {
         "func": <object> func,
         "nlocals": [

@@ -2,12 +2,13 @@ import inspect
 import sys
 import threading
 from _thread import LockType as LockType
-from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Event, Thread, _active
 from types import FrameType, NoneType
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
+
+import bytecode
 
 from pyckpt import interpreter, objects
 from pyckpt.analyzer import analyze_stack_top
@@ -18,6 +19,7 @@ from pyckpt.frame import (
     snapshot_from_frame,
 )
 from pyckpt.interpreter.frame import NullObject
+from pyckpt.objects import Mapping
 
 FrameCocoon = Union[FunctionFrameCocoon, GeneratorFrameCocoon]
 
@@ -64,7 +66,6 @@ class LiveThread:
         self._resumed = False
         self._leaf_frame = leaf_frame
         self._non_leaf_frames = non_leaf_frames
-        self._result = Future()
         self._handle = handle
         self._states = exception_states
 
@@ -83,7 +84,6 @@ class LiveThread:
             raise NotImplementedError(
                 f"frame evaluation ends with exception state: {exc_states[1]}"
             )
-        self._result.set_result(ret)
 
     @property
     def handle(self) -> Thread:
@@ -95,7 +95,6 @@ class LiveThread:
         self._resumed = True
         self._handle.start()
         self._handle.join(timeout)
-        return self._result.result(timeout=timeout)
 
 
 @dataclass
@@ -171,7 +170,9 @@ def snapshot_from_thread(
         last_frame.stack.append(_lock_acquire)
         last_frame.stack.extend(f_locals[n] for n in arg_names)
         last_frame.is_leaf = True
-        last_frame.prev_instr_offset -= 1
+        last_frame.prev_instr_offset -= (
+            1 + bytecode.ConcreteInstr("CALL", 0).use_cache_opcodes()
+        )
 
     non_leaf_frames = ThreadCocoon.extract_frames(frame, max_frames)
     exception_states = interpreter.save_thread_state(t)
