@@ -1,16 +1,13 @@
-import dis
-import json
 import sys
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from time import sleep
 from types import FrameType
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Generic, Optional, TypeVar
 
 import forbiddenfruit as patch
-from bytecode import Bytecode, ControlFlowGraph
 
-from pyckpt.analyzer import _symbolic_eval
 from pyckpt.thread import (
     LiveThread,
     LockType,
@@ -20,6 +17,29 @@ from pyckpt.thread import (
     _waiting_threads,
     snapshot_from_thread,
 )
+
+T = TypeVar("T")
+
+
+class SingletonValue(Generic[T]):
+    _instance: Optional["SingletonValue"] = None
+    _initialized: bool = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(SingletonValue, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, value: T):
+        if not SingletonValue._initialized:
+            self._value = value
+            SingletonValue._initialized = True
+
+    def set_value(self, value: T):
+        self._value = value
+
+    def get_value(self) -> T:
+        return self._value
 
 
 def test_thread_capture(capsys):
@@ -80,6 +100,62 @@ def test_thread_capture_with_exception(capsys):
     live_thread: LiveThread = c.spawn(objs[c.thread_id])
     live_thread.evaluate(timeout=1.0)
 
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+
+
+def test_thread_multiple_captures(capsys):
+    @dataclass
+    class ReturnValue:
+        cocoon: Optional[ThreadCocoon]
+        multi_capture: bool
+
+    objs: Optional[Dict] = {}
+    ret = SingletonValue(ReturnValue(None, False))
+
+    s = "hello_world"
+    exc = "executed"
+
+    def test():
+        nonlocal ret
+
+        thread_cocoon = snapshot_from_thread(threading.current_thread())
+        if thread_cocoon is not None:
+            cocoon = thread_cocoon.clone(objs)
+            ret.get_value().cocoon = cocoon
+
+        if ret.get_value().multi_capture:
+            _thread_cocoon = snapshot_from_thread(threading.current_thread())
+            if _thread_cocoon is not None:
+                ret.get_value().cocoon = _thread_cocoon.clone(objs)
+            print(exc)
+
+        print(s)
+
+    t = threading.Thread(target=test)
+    t.start()
+    t.join()
+
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+    assert isinstance(ret.get_value().cocoon, ThreadCocoon)
+    assert isinstance(objs, Dict)
+
+    assert id(t) in objs
+    cocoon = ret.get_value().cocoon
+    live_thread: LiveThread = cocoon.spawn(objs[id(t)])
+
+    ret.get_value().multi_capture = True
+    live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+    assert result.out.count(exc) == 1
+
+    cocoon = ret.get_value().cocoon
+    live_thread = cocoon.spawn(objs[id(live_thread.handle)])
+
+    ret.get_value().multi_capture = False
+    live_thread.evaluate(timeout=None)
     result = capsys.readouterr()
     assert result.out.count(s) == 1
 
@@ -232,13 +308,3 @@ def test_star_platinum_capture_waiting(capsys):
 
     result = capsys.readouterr()
     assert result.out.count("executed") == 1
-
-
-def test_inspect():
-    dis.dis(_lock_acquire)
-    code = Bytecode.from_code(
-        _lock_acquire.__code__, conserve_exception_block_stackdepth=True
-    )
-
-    cfg = ControlFlowGraph.from_bytecode(code)
-    print(json.dumps(_symbolic_eval(cfg, False), indent=2))

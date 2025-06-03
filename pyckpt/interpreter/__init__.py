@@ -1,7 +1,9 @@
 from .frame import (
+    EvaluateResult,
     ExceptionStates,
     NullObject,
     eval_frame_at_lasti,
+    get_generator,
     restore_thread_state,
     save_thread_state,
     set_profile_all_threads,
@@ -20,11 +22,13 @@ from .generator import (
 )
 
 __all__ = [
+    "EvaluateResult",
     "eval_frame_at_lasti",
     "ExceptionStates",
     "restore_thread_state",
     "save_thread_state",
     "snapshot",
+    "get_generator",
     "get_generator_type",
     "make_generator",
     "snapshot_generator",

@@ -11,7 +11,7 @@ from pyckpt.interpreter.cpython cimport (
     _PyEval_EvalFrameDefault,
 )
 from pyckpt.interpreter.frame cimport init_locals_and_stack, _snapshot_frame
-from pyckpt.interpreter.frame import NullObject, fetch_exception, restore_exception
+from pyckpt.interpreter.frame import NullObject, fetch_exception, restore_exception, EvaluateResult
 
 
 if (3, 11) <= sys.version_info <= (3, 12):
@@ -259,7 +259,7 @@ cpdef object resume_generator(object generator, object is_leaf, object ret_val =
         raise RuntimeError(f"clear interpreter frame failed, generator: {generator}")
     # TODO: add traceback support, here we simply pass `None`
     tb = None
-    return (result_obj, (type(e), e, tb))
+    return EvaluateResult(result_obj, (type(e), e, tb))
 
 class ClearFrame(Exception): ...
 

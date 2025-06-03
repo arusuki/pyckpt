@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import FrameType, FunctionType
-from typing import Any, Callable, Generator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
 
 from pyckpt import interpreter, objects
-from pyckpt.interpreter import ExceptionStates
-from pyckpt.interpreter.frame import get_generator
+from pyckpt.interpreter import EvaluateResult, ExceptionStates, get_generator
+from pyckpt.objects import Mapping
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 
@@ -26,6 +26,8 @@ class LiveFrame(ABC):
             raise ValueError(f"frame {self} already evaluated")
         self._evaluated = True
         ret = self._evaluate(ret_val, exc_states)
+        if not isinstance(ret, EvaluateResult):
+            ret = EvaluateResult(ret, None)
         self._cleanup()
         return ret
 
@@ -110,8 +112,12 @@ class FunctionFrameCocoon:
             prev_instr_offset=self.prev_instr_offset,
         )
 
-    def clone(self) -> "FunctionFrameCocoon":
-        return objects.copy(self)
+    def clone(
+        self,
+        object_table: Optional[Dict] = None,
+        persist_mapping: Optional[Dict[Type, Mapping]] = None,
+    ) -> "FunctionFrameCocoon":
+        return objects.copy(self, objects=object_table, persist_mapping=persist_mapping)
 
 
 @dataclass(frozen=True)
@@ -126,7 +132,9 @@ class GeneratorFrameCocoon:
         )
 
     def clone(self):
-        return objects.copy(self)
+        object_table: Optional[Dict] = None
+        persist_mapping: Optional[Dict[Type, Mapping]] = None
+        return objects.copy(self, objects=object_table, persist_mapping=persist_mapping)
 
 
 def snapshot_from_frame(
