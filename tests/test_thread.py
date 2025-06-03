@@ -1,6 +1,7 @@
 import sys
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from time import sleep
 from types import FrameType
 from typing import Callable, Dict, Generic, Optional, TypeVar
@@ -33,27 +34,6 @@ class SingletonValue(Generic[T]):
         if not SingletonValue._initialized:
             self._value = value
             SingletonValue._initialized = True
-
-    def set_value(self, value: T):
-        self._value = value
-
-    def get_value(self) -> T:
-        return self._value
-
-
-class SingletonClass(Generic[T]):
-    _instance: Optional["SingletonClass"] = None
-    _initialized: bool = False
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(SingletonClass, cls).__new__(cls)
-        return cls._instance
-
-    def __init__(self, value: T):
-        if not SingletonClass._initialized:
-            self._value = value
-            SingletonClass._initialized = True
 
     def set_value(self, value: T):
         self._value = value
@@ -125,28 +105,29 @@ def test_thread_capture_with_exception(capsys):
 
 
 def test_thread_multiple_captures(capsys):
-    c: Optional[ThreadCocoon] = None
-    sin_c = SingletonClass(c)
+    @dataclass
+    class ReturnValue:
+        cocoon: Optional[ThreadCocoon]
+        multi_capture: bool
+
     objs: Optional[Dict] = {}
-    flag = False
-    multi_capture = SingletonValue(flag)
+    ret = SingletonValue(ReturnValue(None, False))
 
     s = "hello_world"
     exc = "executed"
 
     def test():
-        nonlocal sin_c
+        nonlocal ret
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
             cocoon = thread_cocoon.clone(objs)
-            sin_c.set_value(cocoon)
+            ret.get_value().cocoon = cocoon
 
-        if multi_capture.get_value():
+        if ret.get_value().multi_capture:
             _thread_cocoon = snapshot_from_thread(threading.current_thread())
             if _thread_cocoon is not None:
-                cocoon = _thread_cocoon.clone(objs)
-                sin_c.set_value(cocoon)
+                ret.get_value().cocoon = _thread_cocoon.clone(objs)
             print(exc)
 
         print(s)
@@ -157,20 +138,24 @@ def test_thread_multiple_captures(capsys):
 
     result = capsys.readouterr()
     assert result.out.count(s) == 1
-    assert isinstance(sin_c.get_value(), ThreadCocoon)
+    assert isinstance(ret.get_value().cocoon, ThreadCocoon)
     assert isinstance(objs, Dict)
 
     assert id(t) in objs
-    live_thread: LiveThread = sin_c.get_value().spawn(objs[id(t)])
-    multi_capture.set_value(True)
+    cocoon = ret.get_value().cocoon
+    live_thread: LiveThread = cocoon.spawn(objs[id(t)])
+
+    ret.get_value().multi_capture = True
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
     assert result.out.count(s) == 1
     assert result.out.count(exc) == 1
 
-    live_thread = sin_c.get_value().spawn(objs[id(live_thread.handle)])
-    multi_capture.set_value(False)
-    live_thread.evaluate(timeout=1.0)
+    cocoon = ret.get_value().cocoon
+    live_thread = cocoon.spawn(objs[id(live_thread.handle)])
+
+    ret.get_value().multi_capture = False
+    live_thread.evaluate(timeout=None)
     result = capsys.readouterr()
     assert result.out.count(s) == 1
 
