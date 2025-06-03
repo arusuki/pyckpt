@@ -1,11 +1,15 @@
+import inspect
 import sys
 import threading
+from _thread import LockType as LockType
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import dataclass
-from threading import Thread
-from typing import Any, Callable, Dict, List, Optional, Union
+from threading import Event, Thread, _active
+from types import FrameType, NoneType
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Type, Union
 
-from pyckpt import interpreter, objects, platform
+from pyckpt import interpreter, objects
 from pyckpt.analyzer import analyze_stack_top
 from pyckpt.frame import (
     FunctionFrameCocoon,
@@ -13,8 +17,34 @@ from pyckpt.frame import (
     LiveFrame,
     snapshot_from_frame,
 )
+from pyckpt.interpreter.frame import NullObject
 
 FrameCocoon = Union[FunctionFrameCocoon, GeneratorFrameCocoon]
+
+_waiting_threads: Set[Thread] = set()
+
+_original_lock_acquire = LockType.acquire
+
+
+def _current_thread() -> Optional[Thread]:
+    tid = threading.get_ident()
+    return _active[tid] if tid in _active else None
+
+
+def _lock_acquire(self, blocking: bool = True, timeout: float = -1):
+    t = _current_thread()
+    if t is None:
+        return _original_lock_acquire(self, blocking, timeout)
+
+    _waiting_threads.add(t)
+    ret = _original_lock_acquire(self, blocking, timeout)
+    _waiting_threads.discard(t)
+    return ret
+
+
+def _construct_waiting_threads(suspended: Dict[Thread, FrameType]):
+    frames = sys._current_frames()
+    return {t: frames[t.ident] for t in _waiting_threads if t not in suspended}
 
 
 class LiveThread:
@@ -46,7 +76,7 @@ class LiveThread:
         interpreter.restore_thread_state(self._states)
 
         ret, exc_states = leaf_frame.evaluate()
-        for frame in reversed(non_leaf_frames):
+        for frame in non_leaf_frames:
             ret, exc_states = frame.evaluate(ret, exc_states)
         if exc_states is not None:
             # FIXME:
@@ -77,7 +107,7 @@ class ThreadCocoon:
 
     @staticmethod
     def extract_frames(
-        frame,
+        frame: FrameType,
         max_frames: Optional[int],
     ) -> List[FrameCocoon]:
         non_leaf_frames = []
@@ -118,15 +148,95 @@ class ThreadCocoon:
         return objects.copy(self, objects=object_table, persist_mapping=pm)
 
 
-def snapshot_from_thread(t: Thread, max_frames: Optional[int] = None):
-    is_other = threading.current_thread().ident != t.ident
-    if is_other:
-        platform.suspend_thread(t)
+def snapshot_from_thread(
+    t: Thread,
+    max_frames: Optional[int] = None,
+    frame: Optional[FrameType] = None,
+):
+    """
+    Either `(t is threading.current_thread()) == True` or called by op in THE_WORLD()`
+    """
+    if frame is None:
+        frame = sys._current_frames()[t.ident]
 
-    frame = sys._current_frames()[t.ident]
-    last_frame = snapshot_from_frame(frame, is_other, analyze_stack_top)
+    last_frame = snapshot_from_frame(frame, False, analyze_stack_top)
     if last_frame is None:  # return from LiveThread
         return None
+
+    if frame.f_code is _lock_acquire.__code__:
+        assert isinstance(last_frame, FunctionFrameCocoon)
+        arg_names, *_, f_locals = inspect.getargvalues(frame)
+        assert len(arg_names) == 3
+        last_frame.stack.append(NullObject)
+        last_frame.stack.append(_lock_acquire)
+        last_frame.stack.extend(f_locals[n] for n in arg_names)
+        last_frame.is_leaf = True
+        last_frame.prev_instr_offset -= 1
+
     non_leaf_frames = ThreadCocoon.extract_frames(frame, max_frames)
     exception_states = interpreter.save_thread_state(t)
     return ThreadCocoon(id(t), last_frame, non_leaf_frames, exception_states)
+
+
+class StarPlatinum:
+    def __init__(
+        self,
+        operation: Callable[
+            [Dict[Thread, FrameType], Dict[Thread, FrameType]], NoneType
+        ],
+        timeout=None,
+    ):
+        self._user = threading.current_thread()
+        self._profile = threading.getprofile()
+        self._threads: Dict[Thread, FrameType] = {}
+        self._waiting_threads: Dict[Thread, FrameType] = {}
+        self._all_stopped: Optional[Event] = Event()
+        self._all_released: Optional[Event] = Event()
+        self._running_cnt = 0
+        self._timeout = timeout
+        self._op = operation
+        self._ret = None
+
+        self.exc: Optional[Exception] = None
+
+    @contextmanager
+    def _reset_profile(self):
+        try:
+            yield
+        except Exception as e:
+            self.exc = e
+        self._all_released.set()
+        sys.setprofile(self._profile)
+
+    def _reach(self, cnt: int):
+        self._running_cnt -= cnt
+        if self._running_cnt == 0:
+            self._all_stopped.set()
+
+    def profile_callback(self, frame: FrameType, _event, _arg):
+        ident = threading.current_thread()
+        with self._reset_profile():
+            if ident is not self._user:
+                self._threads[ident] = frame
+                self._reach(1)
+                self._all_released.wait()
+                return None
+            num_threads = sum(1 for _ in threading.enumerate())
+            num_threads -= 1 + len(_waiting_threads)
+            assert num_threads >= 0, "invalid thread count"
+            self._reach(-num_threads)
+            if not self._all_stopped.wait(self._timeout):
+                raise RuntimeError("timeout on waiting thread to suspend")
+            _wait = _construct_waiting_threads(self._threads)
+            self._ret = self._op(self._threads, _wait)
+            return None
+
+    def THE_WORLD(self):
+        def trap():
+            pass
+
+        interpreter.set_profile_all_threads(self.profile_callback)
+        trap()
+        if self.exc:
+            raise self.exc
+        return self._ret

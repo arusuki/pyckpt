@@ -121,9 +121,12 @@ cdef void init_locals_and_stack(
             frame.localsplus[i] = NULL
     cdef PyObject** stack_base = <PyObject**> &frame.localsplus[co_nlocalsplus]
     for i, py_obj in enumerate(stack):
-        Py_INCREF(py_obj)
-        obj = <PyObject*>py_obj
-        stack_base[i] = obj
+        if py_obj is not NullObject:
+            Py_INCREF(py_obj)
+            obj = <PyObject*>py_obj
+            stack_base[i] = obj
+        else:
+            stack_base[i] = NULL
     frame.stacktop = co_nlocalsplus + len(stack)
 
 
