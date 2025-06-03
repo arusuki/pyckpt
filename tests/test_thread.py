@@ -1,17 +1,12 @@
-import dis
-import json
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
 from time import sleep
 from types import FrameType
-from typing import Any, Callable, Dict, Generic, Optional, Type, TypeVar
+from typing import Callable, Dict, Generic, Optional, TypeVar
 
 import forbiddenfruit as patch
-from bytecode import Bytecode, ControlFlowGraph
 
-from pyckpt.analyzer import _symbolic_eval
 from pyckpt.thread import (
     LiveThread,
     LockType,
@@ -328,13 +323,3 @@ def test_star_platinum_capture_waiting(capsys):
 
     result = capsys.readouterr()
     assert result.out.count("executed") == 1
-
-
-def test_inspect():
-    dis.dis(_lock_acquire)
-    code = Bytecode.from_code(
-        _lock_acquire.__code__, conserve_exception_block_stackdepth=True
-    )
-
-    cfg = ControlFlowGraph.from_bytecode(code)
-    print(json.dumps(_symbolic_eval(cfg, False), indent=2))
