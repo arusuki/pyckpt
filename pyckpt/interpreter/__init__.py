@@ -4,6 +4,7 @@ from .frame import (
     eval_frame_at_lasti,
     restore_thread_state,
     save_thread_state,
+    set_profile_all_threads,
     snapshot,
 )
 from .generator import (
@@ -34,4 +35,5 @@ __all__ = [
     "snapshot_generator_frame",
     "make_new_generator",
     "setup_generator",
+    "set_profile_all_threads",
 ]

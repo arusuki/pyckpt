@@ -30,6 +30,15 @@ cdef extern from "Python.h":
     int CO_GENERATOR
     int CO_COROUTINE
     int CO_ASYNC_GENERATOR
+    int WAIT_LOCK
+    int PyTrace_C_CALL
+    int PyTrace_CALL
+
+    ctypedef int (*Py_tracefunc)(PyObject *, PyFrameObject *, int, PyObject *)
+    cdef int PyThread_acquire_lock(PyThread_type_lock lock, int wait_flag)
+    cdef void PyThread_release_lock(PyThread_type_lock lock)
+    cdef int _PyEval_SetProfile(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
+    cdef int _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
 
 
 if (3, 11) <= sys.version_info <= (3, 12):
@@ -37,8 +46,11 @@ if (3, 11) <= sys.version_info <= (3, 12):
     from pyckpt.interpreter.cpython cimport GET_FRAME_311 as GET_FRAME
     from pyckpt.interpreter.cpython cimport PyFrame_InitializeSpecials_311 as _PyFrame_InitializeSpecials
     from pyckpt.interpreter.cpython cimport get_frame_owned_by_generator_311 as get_frame_owned_by_generator
+    from pyckpt.interpreter.cpython cimport  _PyRuntimeState_311 as _PyRuntimeState
 else:
     raise SystemError(f"unsupported python version: {sys.version_info}")
+
+from pyckpt.interpreter.cpython cimport get_python_py_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +81,17 @@ def frame_specials_size():
 
 cdef PyThreadState* _get_thread_state_by_id(unsigned long thread_id):
     cdef PyThreadState *tstate = NULL;
-
-    gil_state = PyGILState_Ensure()
+    cdef _PyRuntimeState* runtime = <_PyRuntimeState*> get_python_py_runtime()
+    if runtime == NULL:
+        return NULL
+    PyThread_acquire_lock(runtime.interpreters.mutex, WAIT_LOCK)
     tstate = PyInterpreterState_ThreadHead(PyThreadState_GET().interp)
+    PyThread_release_lock(runtime.interpreters.mutex)
     while tstate != NULL:
         if tstate.thread_id != thread_id:
             tstate = PyThreadState_Next(tstate)
             continue
-        PyGILState_Release(gil_state)
         return  tstate
-    PyGILState_Release(gil_state)
     return tstate
 
 cdef PyThreadState* get_thread_by_id(unsigned long thread_id):
@@ -108,9 +121,12 @@ cdef void init_locals_and_stack(
             frame.localsplus[i] = NULL
     cdef PyObject** stack_base = <PyObject**> &frame.localsplus[co_nlocalsplus]
     for i, py_obj in enumerate(stack):
-        Py_INCREF(py_obj)
-        obj = <PyObject*>py_obj
-        stack_base[i] = obj
+        if py_obj is not NullObject:
+            Py_INCREF(py_obj)
+            obj = <PyObject*>py_obj
+            stack_base[i] = obj
+        else:
+            stack_base[i] = NULL
     frame.stacktop = co_nlocalsplus + len(stack)
 
 
@@ -131,6 +147,7 @@ def eval_frame_at_lasti(
     nlocals: List[Any],
     stack: List[Any],
     is_leaf: bool,
+    is_return: bool = False,
     ret_value: Any = None,
     prev_instr_offset = -1,
     exc_states: Optional[ExceptionStates] = None,
@@ -141,7 +158,7 @@ def eval_frame_at_lasti(
     cdef size_t size = code.co_nlocalsplus + code.co_stacksize + frame_specials_size();
     cdef _PyInterpreterFrame *frame = <_PyInterpreterFrame*> malloc(sizeof(PyObject*) * size)
 
-    if not is_leaf:
+    if not is_leaf and not is_return:
         stack.append(ret_value)
     _PyFrame_InitializeSpecials(
         frame,
@@ -178,13 +195,13 @@ def _offset_without_cache(
 
 
 # FIXME: these version-dependent functions should be placed separately.
-CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE']
+CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE']
 CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
 def is_call_instr(opcode: int):
     return opcode in CALL_CODES
 
 
-def _fix_non_leaf_call(code: CodeType, code_array: List[dis.Instruction], instr_offset):
+def _fix_non_leaf_call(code_array: List[dis.Instruction], instr_offset):
     """
     Before CPython 3.11, python-python call is not "inlined"
     Hence we need to manually move instr_offset back to the 'CALL' instruction
@@ -237,10 +254,15 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
     fixed_instr_offset = instr_offset
     if not is_leaf:
         fixed_instr_offset = _fix_non_leaf_call(
-            <object> code,
             code_array,
             instr_offset
         )
+
+    is_return = False
+    if code_array[fixed_instr_offset].opcode == dis.opmap["RETURN_VALUE"]:
+        fixed_instr_offset -= 1
+        is_return = True
+
     is_generator = _check_generator(frame)
     stacksize = analyzer(
         <object> func,
@@ -268,6 +290,7 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
         ],
         "prev_instr_offset": instr_offset,
         "is_leaf": is_leaf,
+        "is_return": is_return,
     }
     for obj in chain(captured["nlocals"], captured["stack"]):
         Py_INCREF(obj)
@@ -284,6 +307,8 @@ def save_thread_state(thread: Thread):
     cdef PyThreadState* tstate
     cdef PyObject* exc
     tstate = get_thread_by_id(<unsigned long> thread.ident)
+    if tstate == NULL:
+        raise RuntimeError("fail to fetch python runtime information")
     if __PyErr_Occurred(tstate) != NULL:
         raise RuntimeError("capture a thread while exception is happening")
     exc = _PyErr_GetHandledException(tstate)
@@ -301,3 +326,28 @@ def restore_thread_state(state: Dict):
         raise RuntimeError("set thread state when there is exception pending")
     _PyErr_SetHandledException(PyThreadState_GET(), <PyObject *> exc)
     state["exception"] = None
+
+
+cdef int trace_trampoline(PyObject *callback, PyFrameObject *frame, int what, PyObject *arg) noexcept:
+    assert frame != NULL
+    (<object> callback)(
+        <object> frame,
+        what,
+        <object> arg if arg != NULL else NullObject,
+    )
+    return 0
+
+
+def set_profile_all_threads(func: Optional[FunctionType]):
+    cdef _PyRuntimeState* runtime = <_PyRuntimeState*> get_python_py_runtime()
+    cdef PyThreadState* tstate
+    if runtime == NULL:
+        raise RuntimeError("filed to fetch python runtime")
+
+    PyThread_acquire_lock(runtime.interpreters.mutex, WAIT_LOCK)
+    tstate = PyInterpreterState_ThreadHead(PyThreadState_GET().interp)
+    PyThread_release_lock(runtime.interpreters.mutex)
+
+    while tstate != NULL:
+        _PyEval_SetProfile(tstate, trace_trampoline, <PyObject*> func)
+        tstate = PyThreadState_Next(tstate)

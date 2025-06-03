@@ -37,6 +37,7 @@ class LiveFunctionFrame(LiveFrame):
         func: FunctionType,
         prev_instr_offset: int,
         is_leaf: bool,
+        is_return: bool,
         nlocals: List[Any],
         stack: List[Any],
     ):
@@ -46,6 +47,7 @@ class LiveFunctionFrame(LiveFrame):
         self.stack = stack
         self.nlocals = nlocals
         self.prev_instr_offset = prev_instr_offset
+        self.is_return = is_return
 
     def _evaluate(
         self, ret_val, exc_states: Optional[ExceptionStates]
@@ -56,6 +58,7 @@ class LiveFunctionFrame(LiveFrame):
             self.nlocals,
             self.stack,
             self.is_leaf,
+            self.is_return,
             ret_val,
             self.prev_instr_offset,
             exc_states,
@@ -88,9 +91,10 @@ class LiveGeneratorFrame(LiveFrame):
         del self._is_leaf
 
 
-@dataclass(frozen=True)
+@dataclass
 class FunctionFrameCocoon:
     is_leaf: bool
+    is_return: bool
     func: Callable
     stack: List[Any]
     nlocals: List[Any]
@@ -100,6 +104,7 @@ class FunctionFrameCocoon:
         return LiveFunctionFrame(
             func=self.func,
             is_leaf=self.is_leaf,
+            is_return=self.is_return,
             stack=self.stack,
             nlocals=self.nlocals,
             prev_instr_offset=self.prev_instr_offset,
@@ -136,6 +141,7 @@ def snapshot_from_frame(
     captured = interpreter.snapshot(frame, is_leaf, stack_analyzer)
     return FunctionFrameCocoon(
         is_leaf=is_leaf,
+        is_return=captured["is_return"],
         func=captured["func"],
         nlocals=captured["nlocals"],
         stack=captured["stack"],

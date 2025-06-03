@@ -104,6 +104,32 @@ cdef extern from *:
     static inline int get_frame_created_311() { return FRAME_CREATED_311; }
     static inline int get_frame_suspended_311() { return FRAME_SUSPENDED_311; }
     static inline int get_frame_executing_311() { return FRAME_EXECUTING_311; }
+
+    #include <stdatomic.h>
+
+    typedef struct {
+        PyThread_type_lock mutex;
+        PyInterpreterState *head;
+        PyInterpreterState *main;
+        int64_t next_id;
+    } pyinterpreters_311;
+
+    typedef struct {
+        int _initialized;
+        int preinitializing;
+        int preinitialized;
+        int core_initialized;
+        int initialized;
+        struct {atomic_uintptr_t ptr;} _finalizing;
+        pyinterpreters_311 interpreters;
+    } _PyRuntimeState_311;
+
+    extern __attribute__((weak)) char _PyRuntime;
+
+    static inline void* get_python_py_runtime() {
+        return &_PyRuntime;
+    }
+
     """
 
     # https://github.com/python/cpython/blob/3.11/Include/internal/pycore_frame.h
@@ -130,6 +156,16 @@ cdef extern from *:
     cdef inline int get_frame_created_311()
     cdef inline int get_frame_suspended_311()
     cdef inline int get_frame_executing_311()
+
+    ctypedef struct PyThread_type_lock:
+        pass
+    ctypedef struct pyinterpreters_311:
+        PyThread_type_lock mutex
+    ctypedef struct _PyRuntimeState_311:
+        pyinterpreters_311 interpreters
+
+    cdef void *get_python_py_runtime()
+
 
 cdef extern from "pyerrors.h":
     cdef PyObject* _PyErr_GetHandledException(PyThreadState* tstate)
@@ -160,6 +196,7 @@ cdef extern from "pystate.h":
         pass
 
     cdef PyGILState_STATE PyGILState_Ensure()
+
     cdef void PyGILState_Release(PyGILState_STATE)
 
     cdef PyThreadState * PyThreadState_GET()
