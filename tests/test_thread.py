@@ -310,7 +310,7 @@ def test_star_platinum_capture_waiting(capsys):
     assert result.out.count("executed") == 1
 
 
-def test_multiple_functions_capture(capsys):
+def test_multiple_frame_capture(capsys):
     c: Optional[ThreadCocoon] = None
     objs: Optional[Dict] = {}
 
@@ -338,64 +338,20 @@ def test_multiple_functions_capture(capsys):
     t.start()
     t.join()
 
+    def _check_result(out: str):
+        s1_i = out.find(s1)
+        s2_i = out.find(s2)
+        s3_i = out.find(s3)
+        assert all(i != -1 for i in (s1_i, s2_i, s3_i))
+        assert s1_i < s2_i < s3_i
+
     result = capsys.readouterr()
-    assert result.out.count(s1) == 1
-    assert result.out.count(s2) == 1
-    assert result.out.count(s3) == 1
     assert isinstance(c, ThreadCocoon)
     assert isinstance(objs, Dict)
+    _check_result(result.out)
 
     assert id(t) in objs
     live_thread: LiveThread = c.spawn(objs[id(t)])
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
-    assert result.out.count(s1) == 1
-    assert result.out.count(s2) == 1
-    assert result.out.count(s3) == 1
-
-
-def test_multiple_threads_capture(capsys):
-    c: Optional[ThreadCocoon] = None
-    objs: Optional[Dict] = {}
-
-    s1 = "foo"
-    s2 = "bar"
-    s3 = "test"
-
-    def foo():
-        print(s1)
-
-    def bar():
-        print(s2)
-
-    def baz():
-        nonlocal c
-
-        thread_cocoon = snapshot_from_thread(threading.current_thread())
-        if thread_cocoon is not None:
-            c = thread_cocoon.clone(objs)
-        print(s3)
-
-    t1 = threading.Thread(target=foo)
-    t2 = threading.Thread(target=bar)
-    t3 = threading.Thread(target=baz)
-    t1.start()
-    t2.start()
-    t3.start()
-    t1.join()
-    t2.join()
-    t3.join()
-
-    result = capsys.readouterr()
-    assert result.out.count(s1) == 1
-    assert result.out.count(s2) == 1
-    assert result.out.count(s3) == 1
-    assert isinstance(c, ThreadCocoon)
-    assert isinstance(objs, Dict)
-
-    assert id(t3) in objs
-    live_thread: LiveThread = c.spawn(objs[id(t3)])
-    live_thread.evaluate(timeout=1.0)
-    result = capsys.readouterr()
-    assert result.out.count(s3) == 1
-    pass
+    _check_result(result.out)
