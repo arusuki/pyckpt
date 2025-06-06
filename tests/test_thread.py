@@ -308,3 +308,50 @@ def test_star_platinum_capture_waiting(capsys):
 
     result = capsys.readouterr()
     assert result.out.count("executed") == 1
+
+
+def test_multiple_frame_capture(capsys):
+    c: Optional[ThreadCocoon] = None
+    objs: Optional[Dict] = {}
+
+    s1 = "foo"
+    s2 = "bar"
+    s3 = "test"
+
+    def foo():
+        nonlocal c
+
+        thread_cocoon = snapshot_from_thread(threading.current_thread())
+        if thread_cocoon is not None:
+            c = thread_cocoon.clone(objs)
+        print(s1)
+
+    def bar():
+        foo()
+        print(s2)
+
+    def test():
+        bar()
+        print(s3)
+
+    t = threading.Thread(target=test)
+    t.start()
+    t.join()
+
+    def _check_result(out: str):
+        s1_i = out.find(s1)
+        s2_i = out.find(s2)
+        s3_i = out.find(s3)
+        assert all(i != -1 for i in (s1_i, s2_i, s3_i))
+        assert s1_i < s2_i < s3_i
+
+    result = capsys.readouterr()
+    assert isinstance(c, ThreadCocoon)
+    assert isinstance(objs, Dict)
+    _check_result(result.out)
+
+    assert id(t) in objs
+    live_thread: LiveThread = c.spawn(objs[id(t)])
+    live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    _check_result(result.out)
