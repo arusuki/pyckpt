@@ -1,19 +1,18 @@
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Optional, Type
 from multiprocessing import Process
 import os
 
 from pyckpt.thread import LiveThread, ThreadCocoon
+import pyckpt.objects as objects
+from pyckpt.objects import Mapping
 
 
 class LiveProcess:
-    def __init__(
-        self, handle: Process, threads: List[ThreadCocoon], exception_states: Dict
-    ):
+    def __init__(self, handle: Process, threads: List[ThreadCocoon]):
         self._resumed = False
         self._threads = threads
         self._handle = handle
-        self._states = exception_states
 
         handle.__init__(target=self._evaluate)
 
@@ -39,10 +38,22 @@ class LiveProcess:
 class ProcessCocoon:
     process_id: int
     threads: List[ThreadCocoon]
-    exception_states: Any
 
-    def spawn(self):
-        pass
+    def spawn(self, handle: Process) -> LiveProcess:
+        live_process = LiveProcess(handle=handle, threads=self.threads)
+        return live_process
 
-    def clone(self) -> "ProcessCocoon":
-        pass
+    def clone(
+        self, object_table: Dict, persist_mapping: Optional[Dict[Type, Mapping]] = None
+    ) -> "ProcessCocoon":
+        def persist_thread(p: Process):
+            pid = id(p)
+            if pid not in object_table:
+                object_table[pid] = object.__new__(Process)
+            return pid
+
+        pm = persist_mapping if persist_mapping else {}
+        pm.update({Process: persist_thread})
+        if self.process_id not in object_table:
+            object_table[self.process_id] = object.__new__(Process)
+        return objects.copy(self, objects=object_table, persist_mapping=pm)
