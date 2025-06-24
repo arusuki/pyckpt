@@ -40,11 +40,11 @@ class LiveProcess:
 class ProcessCocoon:
     process_id: int
     threads: List[ThreadCocoon]
-    _cloned: bool = False
+    _registered: bool = False
 
     def spawn(self, handle: Process) -> LiveProcess:
-        if not self._cloned:
-            raise RuntimeError("can't spawn a processcocoon before clone")
+        if not self._registered:
+            raise RuntimeError("can't spawn a processcocoon before cloning it")
         live_process = LiveProcess(handle=handle, threads=self.threads)
         return live_process
 
@@ -61,6 +61,7 @@ class ProcessCocoon:
             c.clone(object_table=object_table, persist_mapping=persist_mapping)
             for c in self.threads
         ]
+        self._registered = True
         pm = persist_mapping if persist_mapping else {}
         pm.update({Process: persist_process})
         if self.process_id not in object_table:
