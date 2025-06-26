@@ -1,6 +1,7 @@
 import inspect
 import io
 import pickle
+from queue import SimpleQueue
 from threading import Thread
 from typing import Generator
 
@@ -99,3 +100,18 @@ def test_load_with_generator():
     assert next(loaded) == 2
     with pytest.raises(StopIteration):
         next(loaded)
+
+def test_reduce_simple_queue():
+    sq = SimpleQueue()
+    sq.put(42)
+    sq.put(43)
+
+    buf = io.BytesIO()
+    dump(buf, sq)
+
+    buf.seek(0)
+    loaded = pickle.load(buf)
+    assert isinstance(loaded, SimpleQueue)
+    assert loaded.get(block=False) == 42
+    assert loaded.get(block=False) == 43
+

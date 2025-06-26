@@ -19,7 +19,12 @@ def interpreter_module() -> List[Union[Extension, str]]:
             f"unsupported CPython version:\
                 {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         )
-    return ["pyckpt/interpreter/frame.pyx", "pyckpt/interpreter/generator.pyx"]
+
+    return [
+        "pyckpt/interpreter/frame.pyx",
+        "pyckpt/interpreter/generator.pyx",
+        "pyckpt/interpreter/objects.pyx",
+    ]
 
 
 cython_modules = []

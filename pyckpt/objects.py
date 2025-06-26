@@ -1,7 +1,8 @@
 import copyreg
 from io import BytesIO
+from queue import SimpleQueue
 from types import FrameType, NoneType
-from typing import IO, Any, Callable, Dict, Generator, Optional, Tuple, Type
+from typing import IO, Any, Callable, Dict, Generator, List, Optional, Tuple, Type
 
 import dill
 
@@ -13,6 +14,8 @@ from pyckpt.interpreter.generator import (
     snapshot_generator,
     snapshot_generator_frame,
 )
+
+from pyckpt.interpreter.objects import snapshot_simple_queue
 
 None_PID = 0
 
@@ -42,11 +45,22 @@ def reduce_null_object(_obj: NullObjectType):
     return _ret_null_object, ()
 
 
+
+def reduce_simple_queue(sq: SimpleQueue):
+    def make_simple_queue(lst: List):
+        q = SimpleQueue()
+        for elem in lst:
+            q.put(elem)
+        return q
+    return make_simple_queue, (snapshot_simple_queue(sq),)
+
+
 def new_snapshot_registry() -> Registry:
     return {
         FrameType: reduce_as_none,  # TODO: support frame types
         get_generator_type(): reduce_generator,
         NullObjectType: reduce_null_object,
+        SimpleQueue: reduce_simple_queue,
     }
 
 
