@@ -104,11 +104,12 @@ def test_thread_capture_with_exception(capsys):
     assert result.out.count(s) == 1
 
 
+@dataclass
+class ReturnValue:
+    cocoon: Optional[ThreadCocoon]
+    multi_capture: bool
+
 def test_thread_multiple_captures(capsys):
-    @dataclass
-    class ReturnValue:
-        cocoon: Optional[ThreadCocoon]
-        multi_capture: bool
 
     objs: Optional[Dict] = {}
     ret = SingletonValue(ReturnValue(None, False))
