@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Event, Thread, _active
 from types import FrameType, NoneType
-from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Type, Union, IO
 
 import bytecode
 
@@ -47,6 +47,14 @@ def _lock_acquire(self, blocking: bool = True, timeout: float = -1):
 def _construct_waiting_threads(suspended: Dict[Thread, FrameType]):
     frames = sys._current_frames()
     return {t: frames[t.ident] for t in _waiting_threads if t not in suspended}
+
+
+class ThreadId:
+    def __init__(self, thread_id):
+        self.tid = thread_id
+
+    def __call__(self):
+        return {self.tid: object.__new__(Thread)}
 
 
 class LiveThread:
@@ -130,6 +138,40 @@ class ThreadCocoon:
             self.exception_states,
         )
         return live_thread
+
+    def dump(
+        self,
+        file: Optional[IO[bytes]] = None,
+        persist_mapping: Optional[Dict] = None,
+        pickler: Optional[objects.Pickler] = None,
+    ) -> ThreadId:
+        if all(v is None for v in (file, persist_mapping, pickler)):
+            raise ValueError("invalid pickler")
+
+        thread_ids = set()
+
+        def persist_thread(t: Thread):
+            tid = id(t)
+            if tid not in thread_ids:
+                thread_ids.add(tid)
+            return tid
+
+        pm = persist_mapping if persist_mapping else {}
+        pickler = pickler if pickler else objects.create_pickler(file, pm)
+        pickler.persist_mapping().update({Thread: persist_thread})
+        objects.dump(pickler, self)
+
+        tid = ThreadId(self.thread_id)
+
+        return tid
+
+    @staticmethod
+    def load(
+        file: IO[bytes],
+        thread_id: ThreadId,
+    ) -> "ThreadCocoon":
+        objs = thread_id()
+        return objects.load(file, objs)
 
     def clone(
         self, object_table: Dict, persist_mapping: Optional[Dict[Type, Mapping]] = None

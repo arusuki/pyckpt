@@ -1,13 +1,32 @@
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Type
+from typing import List, Dict, Optional, Type, IO
 from types import FrameType
 from multiprocessing import Process
 from threading import Thread
+from queue import Queue
 import os
 
-from pyckpt.thread import LiveThread, ThreadCocoon, snapshot_from_thread, StarPlatinum
+from pyckpt.thread import (
+    LiveThread,
+    ThreadCocoon,
+    snapshot_from_thread,
+    StarPlatinum,
+    ThreadId,
+)
 import pyckpt.objects as objects
 from pyckpt.objects import Mapping
+
+
+class ProcessId:
+    def __init__(self, process_id, thread_ids: List[ThreadId]):
+        self.pid = process_id
+        self.tids = thread_ids
+
+    def __call__(self):
+        objs = {self.pid: object.__new__(Process)}
+        for tid in self.tids:
+            objs.update(tid())
+        return objs
 
 
 class LiveProcess:
@@ -44,9 +63,41 @@ class ProcessCocoon:
 
     def spawn(self, handle: Process) -> LiveProcess:
         if not self._registered:
-            raise RuntimeError("can't spawn a processcocoon before cloning it")
+            raise RuntimeError("can't spawn a processcocoon before registering it")
         live_process = LiveProcess(handle=handle, threads=self.threads)
         return live_process
+
+    def dump(
+        self, file: IO[bytes], persist_mapping: Optional[Dict] = None
+    ) -> ProcessId:
+        process_ids = set()
+
+        def persist_process(p: Process):
+            pid = id(p)
+            if pid not in process_ids:
+                process_ids.add(pid)
+            return pid
+
+        pm = persist_mapping if persist_mapping else {}
+        pm.update({Process: persist_process})
+        pickler = objects.create_pickler(file, pm)
+
+        tids = []
+        for t in self.threads:
+            tids.append(t.dump(pickler=pickler))
+
+        objects.dump(pickler, self)
+        pid = ProcessId(self.process_id, tids)
+
+        return pid
+
+    @staticmethod
+    def load(
+        file: IO[bytes],
+        process_id: ProcessId,
+    ) -> "ProcessCocoon":
+        objs = process_id()
+        return objects.load(file, objs)
 
     def clone(
         self, object_table: Dict, persist_mapping: Optional[Dict[Type, Mapping]] = None
@@ -78,10 +129,20 @@ def extract_threads(running: Dict[Thread, FrameType], waiting: Dict[Thread, Fram
     return threads
 
 
+def snapshot(q: Queue, timeout=None):
+    stopper = StarPlatinum(operation=extract_threads, timeout=timeout)
+    threads = stopper.THE_WORLD()
+    q.put(threads)
+
+
 def snapshot_from_process(p: Process, timeout=None):
     assert p.pid == os.getpid()
 
-    stopper = StarPlatinum(operation=extract_threads, timeout=timeout)
-    threads = stopper.THE_WORLD()
+    q = Queue()
+    t = Thread(target=snapshot, args=(q, timeout))
+
+    t.start()
+    threads = q.get()
+    t.join()
 
     return ProcessCocoon(id(p), threads)
