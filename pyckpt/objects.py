@@ -75,18 +75,23 @@ class Pickler(dill.Pickler):
             return self._pm[obj_type](obj)
         return None
 
+    def persist_mapping(self):
+        return self._pm
+
+
+def create_pickler(
+    file: IO[bytes],
+    persist_mapping: Optional[Dict[Type, Mapping]] = None,
+) -> Pickler:
+    return Pickler(file=file, persistent_mapping=persist_mapping)
+
 
 def dump(
-    file: IO[bytes],
+    pickler: Pickler,
     cocoon: Any,
-    reduce_registry: Optional[Registry] = None,
-    persist_mapping: Optional[Dict[Type, Mapping]] = None,
 ):
-    pickler = Pickler(file=file, persistent_mapping=persist_mapping)
     dispatch_table = copyreg.dispatch_table.copy()
     registry = new_snapshot_registry()
-    if reduce_registry:
-        registry.update(reduce_registry)
     for _type, _entry in registry.items():
         dispatch_table[_type] = _entry
     pickler.dispatch_table = dispatch_table
@@ -110,11 +115,11 @@ def load(file: IO[bytes], objects: Dict) -> Any:
 def copy(
     cocoon: Any,
     objects: Optional[Dict] = None,
-    reduce_registry: Optional[Registry] = None,
     persist_mapping: Optional[Dict[Type, Mapping]] = None,
 ):
     buffer = BytesIO()
-    dump(buffer, cocoon, reduce_registry, persist_mapping)
+    pickler = create_pickler(buffer, persist_mapping)
+    dump(pickler, cocoon)
     buffer.seek(0)
     objects = objects if objects else {}
     return load(buffer, objects)

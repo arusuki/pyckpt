@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from time import sleep
 from types import FrameType
 from typing import Callable, Dict, Generic, Optional, TypeVar
+from io import BytesIO
 
 import forbiddenfruit as patch
 
@@ -356,3 +357,37 @@ def test_multiple_frame_capture(capsys):
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
     _check_result(result.out)
+
+
+def test_thread_capture_with_dump(capsys):
+    c: Optional[ThreadCocoon] = None
+    objs: Optional[Dict] = {}
+
+    s = "hello_world"
+
+    def test():
+        nonlocal c, objs
+
+        thread_cocoon = snapshot_from_thread(threading.current_thread())
+        if thread_cocoon is not None:
+            buffer = BytesIO()
+            thread_id = thread_cocoon.dump(file=buffer)
+            buffer.seek(0)
+            c = ThreadCocoon.load(buffer, thread_id)
+            objs = thread_id()
+        print(s)
+
+    t = threading.Thread(target=test)
+    t.start()
+    t.join()
+
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+    assert isinstance(c, ThreadCocoon)
+    assert isinstance(objs, Dict)
+
+    assert id(t) in objs
+    live_thread: LiveThread = c.spawn(objs[id(t)])
+    live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
