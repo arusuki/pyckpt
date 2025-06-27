@@ -3,11 +3,9 @@ from typing import List, Dict, Optional, Type, IO
 from types import FrameType
 from multiprocessing import Process
 from threading import Thread
-from queue import Queue
 import os
 
 from pyckpt.thread import (
-    LiveThread,
     ThreadCocoon,
     snapshot_from_thread,
     StarPlatinum,
@@ -129,20 +127,17 @@ def extract_threads(running: Dict[Thread, FrameType], waiting: Dict[Thread, Fram
     return threads
 
 
-def snapshot(q: Queue, timeout=None):
-    stopper = StarPlatinum(operation=extract_threads, timeout=timeout)
-    threads = stopper.THE_WORLD()
-    q.put(threads)
-
-
 def snapshot_from_process(p: Process, timeout=None):
     assert p.pid == os.getpid()
+    threads: Optional[List[ThreadCocoon]] = None
 
-    q = Queue()
-    t = Thread(target=snapshot, args=(q, timeout))
+    def snapshot():
+        nonlocal threads
+        stopper = StarPlatinum(operation=extract_threads, timeout=timeout)
+        threads = stopper.THE_WORLD()
 
+    t = Thread(target=snapshot)
     t.start()
-    threads = q.get()
     t.join()
 
     return ProcessCocoon(id(p), threads)
