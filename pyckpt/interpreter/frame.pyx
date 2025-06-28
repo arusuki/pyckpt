@@ -13,12 +13,19 @@ from pyckpt.interpreter.cpython cimport (
     _PyErr_SetHandledException,
     _PyEval_EvalFrameDefault,
 )
+from pyckpt.util import (
+    CodePosition,
+    BytecodeParseError,
+    dump_code_and_offset,
+)
 
 import dis
 import inspect
 import logging
 import sys
 import bytecode
+
+logger = logging.getLogger(__name__)
 
 class NullObjectType:
 
@@ -218,8 +225,14 @@ def _fix_non_leaf_call(code_array: List[dis.Instruction], instr_offset):
         while code_array[current].opcode == CACHE:
             current -= 1
         instr_offset = current
-    assert is_call_instr(code_array[instr_offset].opcode),\
-        f"Invalid op {code_array[instr_offset]} at offset: {instr_offset}"
+    if not is_call_instr(code_array[instr_offset].opcode):
+        raise BytecodeParseError(
+            CodePosition(
+                None,
+                instr_offset,
+                f"Invalid op {code_array[instr_offset]} at offset: {instr_offset}"
+            ),
+        )
     return instr_offset
 
 cdef int _check_generator(_PyInterpreterFrame* frame):
@@ -312,7 +325,12 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
 
 def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> Dict:
     cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*>frame_obj)
-    return _snapshot_frame(_frame, <int> is_leaf, analyzer)
+    try:
+        return _snapshot_frame(_frame, <int> is_leaf, analyzer)
+    except BytecodeParseError as e:
+        Py_INCREF(<object> frame_obj.f_code)
+        e.pos().code = <object> frame_obj.f_code
+        raise e
 
 
 def save_thread_state(thread: Thread):

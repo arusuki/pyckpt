@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from bytecode import BasicBlock, Bytecode, ControlFlowGraph, SetLineno
 from bytecode.instr import Instr, TryBegin, TryEnd
 
-from pyckpt.dump import dump_code_and_offset
+from pyckpt.util import dump_code_and_offset
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 

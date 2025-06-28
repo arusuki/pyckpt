@@ -1,17 +1,21 @@
+import logging
 from multiprocessing import Process
 from threading import Thread
-from typing import Optional, Dict
+from typing import Optional
 from io import BytesIO
 from time import sleep
 import multiprocessing
 import threading
+import traceback
 
+from pyckpt import configure_logging
 from pyckpt.process import (
     ProcessCocoon,
     snapshot_from_process,
-    LiveProcess,
     ProcessId,
 )
+
+configure_logging(logging.DEBUG)
 
 
 def foo():
@@ -25,45 +29,41 @@ def bar():
 def process_capture(q: multiprocessing.Queue, s: str):
     stream: Optional[bytes] = None
     process_id: Optional[ProcessId] = None
+    try:
+        t1 = Thread(target=foo)
+        t2 = Thread(target=bar)
+        t1.start()
+        t2.start()
+        process_cocoon, err = snapshot_from_process(multiprocessing.current_process())
+        if err:
+            raise err
+        if process_cocoon is not None:
+            buffer = BytesIO()
+            process_id = process_cocoon.dump(file=buffer)
+            stream = buffer.getvalue()
+        q.put(process_cocoon)
 
-    t1 = Thread(target=foo)
-    t2 = Thread(target=bar)
+        t1.join()
+        t2.join()
 
-    t1.start()
-    t2.start()
+        print("executed")
+    except Exception as e:
+        traceback.print_exception(e)
+        q.put(e)
 
-    process_cocoon = snapshot_from_process(multiprocessing.current_process())
-    if process_cocoon is not None:
-        buffer = BytesIO()
-        process_id = process_cocoon.dump(file=buffer)
-        stream = buffer.getvalue()
-
-    for t in threading.enumerate():
-        print(id(t))
-
-    q.put((stream, process_id))
-    q.close()
-
-    t1.join()
-    t2.join()
-
-    print(s)
 
 
 def test_process_capture():
-    try:
-        multiprocessing.set_start_method("fork")
-    except RuntimeError:
-        print("Start method has already been set.")
-
     q = multiprocessing.Queue()
     s = "hello_world"
 
     p = Process(target=process_capture, args=(q, s))
     p.start()
-    stream, process_id = q.get(timeout=5.0)
-    p.join()
-
+    ret = q.get(timeout=3.0)
+    if isinstance(ret, Exception):
+        raise RuntimeError("exception in capture process") from ret
+    assert isinstance(ret, ProcessCocoon)
+    assert len(ret.threads) == 2
     # assert isinstance(stream, bytes)
     # assert isinstance(process_id, ProcessId)
 
@@ -81,3 +81,4 @@ def test_process_capture():
     # live_process.evaluate(timeout=1.0)
     # result = capsys.readouterr()
     # assert result.out.count(s) == 1
+

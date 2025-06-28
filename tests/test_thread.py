@@ -54,6 +54,8 @@ def test_thread_capture(capsys):
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
+            thread_cocoon, err = thread_cocoon
+            assert err is None
             c = thread_cocoon.clone(objs)
         print(s)
 
@@ -86,6 +88,9 @@ def test_thread_capture_with_exception(capsys):
             raise RuntimeError("test")
         except RuntimeError:
             thread_cocoon = snapshot_from_thread(threading.current_thread())
+            if thread_cocoon is not None:
+                thread_cocoon, err = thread_cocoon
+                assert err is None
         if thread_cocoon is not None:
             c = thread_cocoon.clone(objs)
         print(s)
@@ -123,12 +128,17 @@ def test_thread_multiple_captures(capsys):
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
+            thread_cocoon, err = thread_cocoon
+            assert err is None
             cocoon = thread_cocoon.clone(objs)
             ret.get_value().cocoon = cocoon
 
         if ret.get_value().multi_capture:
             _thread_cocoon = snapshot_from_thread(threading.current_thread())
             if _thread_cocoon is not None:
+                if _thread_cocoon:
+                    _thread_cocoon, err = _thread_cocoon
+                    assert err is None
                 ret.get_value().cocoon = _thread_cocoon.clone(objs)
             print(exc)
 
@@ -284,14 +294,20 @@ def test_star_platinum_capture_waiting(capsys):
         assert len(waiting_threads) == 1
         t, frame = next(iter(waiting_threads.items()))
         c = snapshot_from_thread(t, frame=frame)
-        return c.clone(objs)
+        if not c:
+            return (None, RuntimeError("snapshot return `None` value"))
+        c, err = c
+        if err:
+            return (c, err)
+        return c.clone(objs), None
 
     t = threading.Thread(target=thread_func)
 
     with _replace(LockType, "acquire", _lock_acquire):
         t.start()
         with _guard(start, no_op):
-            c = StarPlatinum(op, timeout=1.0).THE_WORLD()
+            c, err = StarPlatinum(op, timeout=1.0).THE_WORLD()
+        assert not err
         assert isinstance(c, ThreadCocoon)
         t.join()
 
@@ -325,6 +341,9 @@ def test_multiple_frame_capture(capsys):
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
+            if thread_cocoon:
+                thread_cocoon, err = thread_cocoon
+                assert err is None
             c = thread_cocoon.clone(objs)
         print(s1)
 
@@ -371,6 +390,8 @@ def test_thread_capture_with_dump(capsys):
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
             buffer = BytesIO()
+            thread_cocoon, err = thread_cocoon
+            assert err is None
             thread_id = thread_cocoon.dump(file=buffer)
             buffer.seek(0)
             c = ThreadCocoon.load(buffer, thread_id)

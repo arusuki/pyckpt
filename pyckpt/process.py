@@ -1,18 +1,19 @@
+import os
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Type, IO
-from types import FrameType
 from multiprocessing import Process
 from threading import Thread
-import os
+from types import FrameType
+from typing import IO, Dict, List, Optional, Type, cast
 
-from pyckpt.thread import (
-    ThreadCocoon,
-    snapshot_from_thread,
-    StarPlatinum,
-    ThreadId,
-)
 import pyckpt.objects as objects
 from pyckpt.objects import Mapping
+from pyckpt.thread import (
+    StarPlatinum,
+    ThreadCocoon,
+    ThreadId,
+    snapshot_from_thread,
+)
+from pyckpt.util import NotNullResult
 
 
 class ProcessId:
@@ -36,10 +37,10 @@ class LiveProcess:
         handle.__init__(target=self._evaluate)
 
     def _evaluate(self):
-        threads = [thread.spawn() for thread in self._threads]
+        threads = [t.spawn() for t in self._threads]
 
-        for thread in threads:
-            thread.evaluate()
+        for t in threads:
+            t.evaluate()
 
     @property
     def handle(self) -> Process:
@@ -82,6 +83,7 @@ class ProcessCocoon:
 
         tids = []
         for t in self.threads:
+            print(self.threads)
             tids.append(t.dump(pickler=pickler))
 
         objects.dump(pickler, self)
@@ -117,27 +119,39 @@ class ProcessCocoon:
             object_table[self.process_id] = object.__new__(Process)
         return objects.copy(self, objects=object_table, persist_mapping=pm)
 
+def extract_threads(
+    running: Dict[Thread, FrameType], 
+    waiting: Dict[Thread, FrameType]
+) -> NotNullResult[List[ThreadCocoon], Exception]:
+    all_threads = running | waiting
+    threads: List[ThreadCocoon] = []
+    for t, frame in all_threads.items():
+        ret = snapshot_from_thread(t, frame=frame)
+        if not ret:
+            return (None, RuntimeError("recover at this function is not allowed"))
+        thread_cocoon, err = ret
+        if err:
+            return (None, err)
+        threads.append(thread_cocoon)
+    return (threads, None)
 
-def extract_threads(running: Dict[Thread, FrameType], waiting: Dict[Thread, FrameType]):
-    all = running | waiting
-    threads: List[ThreadCocoon] = [
-        snapshot_from_thread(t, frame=f) for t, f in all.items()
-    ]
 
-    return threads
-
-
-def snapshot_from_process(p: Process, timeout=None):
+def snapshot_from_process(p: Process, timeout=None) -> NotNullResult[ProcessCocoon, Exception]:
     assert p.pid == os.getpid()
     threads: Optional[List[ThreadCocoon]] = None
+    err: Optional[Exception] = None
 
     def snapshot():
-        nonlocal threads
+        nonlocal threads, err
         stopper = StarPlatinum(operation=extract_threads, timeout=timeout)
-        threads = stopper.THE_WORLD()
+        threads, err = stopper.THE_WORLD()
 
     t = Thread(target=snapshot)
     t.start()
     t.join()
+    if err or not threads:
+        return (None, cast(Exception, err))
 
-    return ProcessCocoon(id(p), threads)
+
+    return (ProcessCocoon(id(p), threads), None)
+

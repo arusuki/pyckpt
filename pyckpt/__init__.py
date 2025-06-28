@@ -3,7 +3,7 @@ import sys
 from typing import IO, Optional
 
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.NullHandler())
+# logger.addHandler(logging.NullHandler())
 
 
 def configure_logging(
