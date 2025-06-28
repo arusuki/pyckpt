@@ -1,12 +1,26 @@
 import inspect
+import logging
 import sys
 import threading
 from _thread import LockType as LockType
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import chain
 from threading import Event, Thread, _active
 from types import FrameType, NoneType
-from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
+from typing import (
+    IO,
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    Set,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import bytecode
 
@@ -20,12 +34,15 @@ from pyckpt.frame import (
 )
 from pyckpt.interpreter.frame import NullObject
 from pyckpt.objects import Mapping
+from pyckpt.util import BytecodeParseError, NotNullResult, Result, dump_code_position
 
 FrameCocoon = Union[FunctionFrameCocoon, GeneratorFrameCocoon]
 
 _waiting_threads: Set[Thread] = set()
 
 _original_lock_acquire = LockType.acquire
+
+logger = logging.getLogger(__name__)
 
 
 def _current_thread() -> Optional[Thread]:
@@ -47,6 +64,14 @@ def _lock_acquire(self, blocking: bool = True, timeout: float = -1):
 def _construct_waiting_threads(suspended: Dict[Thread, FrameType]):
     frames = sys._current_frames()
     return {t: frames[t.ident] for t in _waiting_threads if t not in suspended}
+
+
+class ThreadId:
+    def __init__(self, thread_id):
+        self.tid = thread_id
+
+    def __call__(self):
+        return {self.tid: object.__new__(Thread)}
 
 
 class LiveThread:
@@ -106,10 +131,10 @@ class ThreadCocoon:
 
     @staticmethod
     def extract_frames(
+        non_leaf_frames: List[FrameCocoon],
         frame: FrameType,
         max_frames: Optional[int],
     ) -> List[FrameCocoon]:
-        non_leaf_frames = []
         current_frames = 1
         stop_code = {Thread.run.__code__}
         while frame.f_back is not None:
@@ -120,7 +145,6 @@ class ThreadCocoon:
                 break
             non_leaf_frames.append(snapshot_from_frame(frame, False, analyze_stack_top))
             current_frames += 1
-        return non_leaf_frames
 
     def spawn(self, handle: Thread) -> LiveThread:
         live_thread = LiveThread(
@@ -130,6 +154,40 @@ class ThreadCocoon:
             self.exception_states,
         )
         return live_thread
+
+    def dump(
+        self,
+        file: Optional[IO[bytes]] = None,
+        persist_mapping: Optional[Dict] = None,
+        pickler: Optional[objects.Pickler] = None,
+    ) -> ThreadId:
+        if all(v is None for v in (file, persist_mapping, pickler)):
+            raise ValueError("invalid pickler")
+
+        thread_ids = set()
+
+        def persist_thread(t: Thread):
+            tid = id(t)
+            if tid not in thread_ids:
+                thread_ids.add(tid)
+            return tid
+
+        pm = persist_mapping if persist_mapping else {}
+        pickler = pickler if pickler else objects.create_pickler(file, pm)
+        pickler.persist_mapping().update({Thread: persist_thread})
+        objects.dump(pickler, self)
+
+        tid = ThreadId(self.thread_id)
+
+        return tid
+
+    @staticmethod
+    def load(
+        file: IO[bytes],
+        thread_id: ThreadId,
+    ) -> "ThreadCocoon":
+        objs = thread_id()
+        return objects.load(file, objs)
 
     def clone(
         self, object_table: Dict, persist_mapping: Optional[Dict[Type, Mapping]] = None
@@ -151,39 +209,57 @@ def snapshot_from_thread(
     t: Thread,
     max_frames: Optional[int] = None,
     frame: Optional[FrameType] = None,
-):
+) -> Result[ThreadCocoon, Exception]:
     """
     Either `(t is threading.current_thread()) == True` or called by op in THE_WORLD()`
     """
-    if frame is None:
-        frame = sys._current_frames()[t.ident]
+    try:
+        last_frame: Optional[FrameCocoon] = None
+        non_leaf_frames: List[FrameCocoon] = []
+        if frame is None:
+            frame = sys._current_frames()[t.ident]
 
-    last_frame = snapshot_from_frame(frame, False, analyze_stack_top)
-    if last_frame is None:  # return from LiveThread
-        return None
+        last_frame = snapshot_from_frame(frame, False, analyze_stack_top)
+        if last_frame is None:  # return from LiveThread
+            return None
 
-    if frame.f_code is _lock_acquire.__code__:
-        assert isinstance(last_frame, FunctionFrameCocoon)
-        arg_names, *_, f_locals = inspect.getargvalues(frame)
-        assert len(arg_names) == 3
-        last_frame.stack.append(NullObject)
-        last_frame.stack.append(_lock_acquire)
-        last_frame.stack.extend(f_locals[n] for n in arg_names)
-        last_frame.is_leaf = True
-        last_frame.prev_instr_offset -= (
-            1 + bytecode.ConcreteInstr("CALL", 0).use_cache_opcodes()
-        )
+        if frame.f_code is _lock_acquire.__code__:
+            assert isinstance(last_frame, FunctionFrameCocoon)
+            arg_names, *_, f_locals = inspect.getargvalues(frame)
+            assert len(arg_names) == 3
+            last_frame.stack.append(NullObject)
+            last_frame.stack.append(_lock_acquire)
+            last_frame.stack.extend(f_locals[n] for n in arg_names)
+            last_frame.is_leaf = True
+            last_frame.prev_instr_offset -= (
+                1 + bytecode.ConcreteInstr("CALL", 0).use_cache_opcodes()
+            )
 
-    non_leaf_frames = ThreadCocoon.extract_frames(frame, max_frames)
-    exception_states = interpreter.save_thread_state(t)
-    return ThreadCocoon(id(t), last_frame, non_leaf_frames, exception_states)
+        ThreadCocoon.extract_frames(non_leaf_frames, frame, max_frames)
+        exception_states = interpreter.save_thread_state(t)
+        return (ThreadCocoon(id(t), last_frame, non_leaf_frames, exception_states), None)
+    except Exception as e: 
+        if isinstance(e, BytecodeParseError):
+            dump_code_position(logger, e.consume(), False)
+        logger.error(f"error snapshot frames in {t}, exception: {e}")
+        logger.debug("backtrace of thread under snapshot:")
+        while frame:
+            logger.debug(f"Frame: {frame.f_code.co_name} in {frame.f_code.co_filename}:{frame.f_lineno}")
+            frame = frame.f_back  # 获取上一级 frame
+        logger.debug("captured frames:") 
+        for f in chain(non_leaf_frames, (last_frame,)):
+            logger.debug("%s", f)
+        return (None, e)
 
 
-class StarPlatinum:
+T = TypeVar("T")
+
+class StarPlatinum(Generic[T]):
+
     def __init__(
         self,
         operation: Callable[
-            [Dict[Thread, FrameType], Dict[Thread, FrameType]], NoneType
+            [Dict[Thread, FrameType], Dict[Thread, FrameType]], NotNullResult[T, Exception]
         ],
         timeout=None,
     ):
@@ -229,15 +305,16 @@ class StarPlatinum:
             if not self._all_stopped.wait(self._timeout):
                 raise RuntimeError("timeout on waiting thread to suspend")
             _wait = _construct_waiting_threads(self._threads)
-            self._ret = self._op(self._threads, _wait)
-            return None
+            try:
+                self._ret, self.exc = self._op(self._threads, _wait)
+            except Exception as e:
+                logger.error(f"`StarPlatinum._op` raise exception {e}")
+                self.exc = e
 
-    def THE_WORLD(self):
+    def THE_WORLD(self) -> NotNullResult[T, Exception]:
         def trap():
             pass
 
         interpreter.set_profile_all_threads(self.profile_callback)
         trap()
-        if self.exc:
-            raise self.exc
-        return self._ret
+        return self._ret, self.exc

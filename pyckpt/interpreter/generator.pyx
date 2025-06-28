@@ -13,6 +13,7 @@ from pyckpt.interpreter.cpython cimport (
 from pyckpt.interpreter.frame cimport init_locals_and_stack, _snapshot_frame
 from pyckpt.interpreter.frame import NullObject, fetch_exception, restore_exception, EvaluateResult
 
+from pyckpt.util import BytecodeParseError
 
 if (3, 11) <= sys.version_info <= (3, 12):
     from pyckpt.interpreter.cpython cimport PyInterpreterFrame_311 as _PyInterpreterFrame
@@ -108,10 +109,15 @@ def snapshot_generator(generator: Generator):
 
 cpdef snapshot_generator_frame(object generator, object analyzer):
     cdef PyGenObject* gen = <PyGenObject*> generator
-    if gen.gi_frame_state != get_frame_suspended() \
-        and gen.gi_frame_state != get_frame_executing():
-        raise ValueError("snapshot non-(suspended|executing) generator is not supported")
-    return _snapshot_frame(gen.gi_iframe, False, analyzer)
+    try:
+        if gen.gi_frame_state != get_frame_suspended() \
+            and gen.gi_frame_state != get_frame_executing():
+            raise ValueError("snapshot non-(suspended|executing) generator is not supported")
+        return _snapshot_frame(gen.gi_iframe, False, analyzer)
+    except BytecodeParseError as e:
+        Py_INCREF(<object> gen.gi_code)
+        e.pos().code = <object> gen.gi_code
+        raise e
 
 cdef object _setup_generator(PyGenObject* gen, object gen_states, object frame_states):
     cdef _PyInterpreterFrame* frame = gen.gi_iframe
