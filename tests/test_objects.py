@@ -7,13 +7,14 @@ from typing import Generator
 
 import pytest
 
-from pyckpt.objects import dump, load
+from pyckpt.objects import dump, load, create_pickler
 
 
 def test_dump_basic_object():
     buf = io.BytesIO()
     obj = {"a": 1, "b": 2}
-    dump(buf, obj)
+    pickler = create_pickler(buf)
+    dump(pickler, obj)
     buf.seek(0)
     loaded = pickle.load(buf)
     assert loaded == obj
@@ -23,7 +24,8 @@ def test_dump_with_frame_type():
     buf = io.BytesIO()
     frame = inspect.currentframe()
     obj = {"frame": frame}
-    dump(buf, obj)
+    pickler = create_pickler(buf)
+    dump(pickler, obj)
     buf.seek(0)
     loaded = pickle.load(buf)
     assert loaded["frame"] is None
@@ -37,7 +39,8 @@ def test_reduce_generator():
     gen = sample_generator()
     assert next(gen) == 1
     buf = io.BytesIO()
-    dump(buf, gen)
+    pickler = create_pickler(buf)
+    dump(pickler, gen)
 
     buf.seek(0)
     loaded = pickle.load(buf)
@@ -53,7 +56,8 @@ def test_reduce_generator():
 def test_load_basic_object():
     buf = io.BytesIO()
     obj = {"a": 1, "b": 2}
-    threads = dump(buf, obj)
+    pickler = create_pickler(buf)
+    threads = dump(pickler, obj)
     buf.seek(0)
     loaded = load(buf, threads)
     assert loaded == obj
@@ -73,7 +77,8 @@ def test_load_with_threads():
         return tid
 
     persist_mapping = {Thread: persist_thread}
-    _threads = dump(buf, obj, persist_mapping=persist_mapping)
+    pickler = create_pickler(buf, persist_mapping)
+    _threads = dump(pickler, obj)
     buf.seek(0)
     assert id(thread) in thread_ids
 
@@ -92,7 +97,8 @@ def test_load_with_generator():
     gen = sample_generator()
     assert next(gen) == 1
     buf = io.BytesIO()
-    threads = dump(buf, gen)
+    pickler = create_pickler(buf)
+    threads = dump(pickler, gen)
 
     buf.seek(0)
     loaded = load(buf, threads)

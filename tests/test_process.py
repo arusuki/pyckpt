@@ -1,6 +1,6 @@
 from multiprocessing import Process
 from threading import Thread
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict
 from io import BytesIO
 from time import sleep
 import multiprocessing
@@ -81,6 +81,3 @@ def test_process_capture():
     # live_process.evaluate(timeout=1.0)
     # result = capsys.readouterr()
     # assert result.out.count(s) == 1
-
-
-test_process_capture()
