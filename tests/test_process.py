@@ -5,15 +5,13 @@ from typing import Optional
 from io import BytesIO
 from time import sleep
 import multiprocessing
-import threading
 import traceback
 
-from pyckpt import configure_logging
-from pyckpt.process import (
-    ProcessCocoon,
-    snapshot_from_process,
-    ProcessId,
-)
+
+from pyckpt import configure_logging, objects
+
+from pyckpt.objects import FakeQueue
+from pyckpt.process import (ProcessCocoon, snapshot_from_process)
 
 configure_logging(logging.DEBUG)
 
@@ -27,8 +25,8 @@ def bar():
 
 
 def process_capture(q: multiprocessing.Queue, s: str):
-    stream: Optional[bytes] = None
-    process_id: Optional[ProcessId] = None
+    byte_stream: Optional[bytes] = None
+
     try:
         t1 = Thread(target=foo)
         t2 = Thread(target=bar)
@@ -39,9 +37,10 @@ def process_capture(q: multiprocessing.Queue, s: str):
             raise err
         if process_cocoon is not None:
             buffer = BytesIO()
-            process_id = process_cocoon.dump(file=buffer)
-            stream = buffer.getvalue()
-        q.put(process_cocoon)
+            objs = objects.dump(buffer, process_cocoon)
+            byte_stream = buffer.getvalue()
+        if not isinstance(q, FakeQueue):
+            q.put((objs, byte_stream))
 
         t1.join()
         t2.join()
@@ -60,23 +59,25 @@ def test_process_capture():
     p = Process(target=process_capture, args=(q, s))
     p.start()
     ret = q.get(timeout=3.0)
-    if isinstance(ret, Exception):
-        raise RuntimeError("exception in capture process") from ret
-    assert isinstance(ret, ProcessCocoon)
-    assert len(ret.threads) == 2
-    # assert isinstance(stream, bytes)
-    # assert isinstance(process_id, ProcessId)
+    p.join()
 
-    # buffer = BytesIO()
-    # buffer.write(stream)
-    # buffer.seek(0)
-    # c = ProcessCocoon.load(buffer, process_id)
-    # objs = process_id()
+    assert isinstance(ret, tuple) and len(ret) == 2
+    objs, byte_stream = ret
+    assert isinstance(objs, dict)
+    assert isinstance(byte_stream, bytes)
 
-    # assert isinstance(c, ProcessCocoon)
-    # assert isinstance(objs, Dict)
+    assert len(objs) == 2
 
-    # assert id(p) in objs
+    buffer = BytesIO(byte_stream)
+    res = objects.load(buffer, objs)
+    assert isinstance(res, tuple) and len(res) == 2
+    c, objs = res
+    assert isinstance(c, ProcessCocoon)
+    assert isinstance(objs, dict)
+    assert id(p) in objs
+
+    
+    # TODO: add evaluate support, current implementation is wrong.
     # live_process: LiveProcess = c.spawn(objs[id(p)])
     # live_process.evaluate(timeout=1.0)
     # result = capsys.readouterr()

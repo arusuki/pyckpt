@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import logging
 from types import CodeType
-from typing import Generic, Optional, Tuple, TypeVar
+from typing import Optional, Tuple, TypeVar
 
 from bytecode import Bytecode, ControlFlowGraph, format_bytecode, Instr
 

@@ -1,5 +1,7 @@
 import inspect
+from io import StringIO
 import logging
+from multiprocessing import Process
 import sys
 import threading
 from _thread import LockType as LockType
@@ -7,9 +9,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import chain
 from threading import Event, Thread, _active
-from types import FrameType, NoneType
+import traceback
+from types import FrameType
 from typing import (
-    IO,
     Any,
     Callable,
     Dict,
@@ -17,14 +19,13 @@ from typing import (
     List,
     Optional,
     Set,
-    Type,
     TypeVar,
     Union,
 )
 
 import bytecode
 
-from pyckpt import interpreter, objects
+from pyckpt import interpreter
 from pyckpt.analyzer import analyze_stack_top
 from pyckpt.frame import (
     FunctionFrameCocoon,
@@ -33,7 +34,6 @@ from pyckpt.frame import (
     snapshot_from_frame,
 )
 from pyckpt.interpreter.frame import NullObject
-from pyckpt.objects import Mapping
 from pyckpt.util import BytecodeParseError, NotNullResult, Result, dump_code_position
 
 FrameCocoon = Union[FunctionFrameCocoon, GeneratorFrameCocoon]
@@ -66,19 +66,7 @@ def _construct_waiting_threads(suspended: Dict[Thread, FrameType]):
     return {t: frames[t.ident] for t in _waiting_threads if t not in suspended}
 
 
-class ThreadId:
-    def __init__(self, thread_id):
-        self.tid = thread_id
-
-    def __call__(self):
-        return {self.tid: object.__new__(Thread)}
-
-
 class LiveThread:
-    @staticmethod
-    def run_thread(run: Callable):
-        run()
-
     def __init__(
         self,
         handle: Thread,
@@ -105,7 +93,18 @@ class LiveThread:
         for frame in non_leaf_frames:
             ret, exc_states = frame.evaluate(ret, exc_states)
         if exc_states is not None:
-            # FIXME:
+            exc = exc_states[1]
+            logger.error("fatal: frame evaluation ends with exception state")
+            if logger.level <= logging.DEBUG:
+                # FIXME: currently, `_PyInterpreterFrame` is manually allocated.
+                # CPython create frame objects on `_PyInterpreterFrame`, so when it's frees,
+                # we are creating dangling references in frame objects in frame objects in traceback.
+                # Fix this will need to look into how cpython handle such reference when
+                # interpreter frame is poped.
+                s = StringIO()
+                # exc.__traceback__ = exc_states[2] # <-- This will cause segmentation fault
+                traceback.print_exception(exc, file = s)
+                logger.debug("%s", s.getvalue())
             raise NotImplementedError(
                 f"frame evaluation ends with exception state: {exc_states[1]}"
             )
@@ -136,7 +135,10 @@ class ThreadCocoon:
         max_frames: Optional[int],
     ) -> List[FrameCocoon]:
         current_frames = 1
-        stop_code = {Thread.run.__code__}
+        stop_code = {
+            Thread.run.__code__,
+            Process.run.__code__,
+        }
         while frame.f_back is not None:
             if max_frames and current_frames >= max_frames:
                 break
@@ -154,55 +156,6 @@ class ThreadCocoon:
             self.exception_states,
         )
         return live_thread
-
-    def dump(
-        self,
-        file: Optional[IO[bytes]] = None,
-        persist_mapping: Optional[Dict] = None,
-        pickler: Optional[objects.Pickler] = None,
-    ) -> ThreadId:
-        if all(v is None for v in (file, persist_mapping, pickler)):
-            raise ValueError("invalid pickler")
-
-        thread_ids = set()
-
-        def persist_thread(t: Thread):
-            tid = id(t)
-            if tid not in thread_ids:
-                thread_ids.add(tid)
-            return tid
-
-        pm = persist_mapping if persist_mapping else {}
-        pickler = pickler if pickler else objects.create_pickler(file, pm)
-        pickler.persist_mapping().update({Thread: persist_thread})
-        objects.dump(pickler, self)
-
-        tid = ThreadId(self.thread_id)
-
-        return tid
-
-    @staticmethod
-    def load(
-        file: IO[bytes],
-        thread_id: ThreadId,
-    ) -> "ThreadCocoon":
-        objs = thread_id()
-        return objects.load(file, objs)
-
-    def clone(
-        self, object_table: Dict, persist_mapping: Optional[Dict[Type, Mapping]] = None
-    ) -> "ThreadCocoon":
-        def persist_thread(t: Thread):
-            tid = id(t)
-            if tid not in object_table:
-                object_table[tid] = object.__new__(Thread)
-            return tid
-
-        pm = persist_mapping if persist_mapping else {}
-        pm.update({Thread: persist_thread})
-        if self.thread_id not in object_table:
-            object_table[self.thread_id] = object.__new__(Thread)
-        return objects.copy(self, objects=object_table, persist_mapping=pm)
 
 
 def snapshot_from_thread(

@@ -7,13 +7,13 @@ from typing import Generator
 
 import pytest
 
-from pyckpt.objects import dump, load, create_pickler
+from pyckpt.objects import dump, load, Pickler
 
 
 def test_dump_basic_object():
     buf = io.BytesIO()
     obj = {"a": 1, "b": 2}
-    pickler = create_pickler(buf)
+    pickler = Pickler(buf)
     dump(pickler, obj)
     buf.seek(0)
     loaded = pickle.load(buf)
@@ -24,7 +24,7 @@ def test_dump_with_frame_type():
     buf = io.BytesIO()
     frame = inspect.currentframe()
     obj = {"frame": frame}
-    pickler = create_pickler(buf)
+    pickler = Pickler(buf)
     dump(pickler, obj)
     buf.seek(0)
     loaded = pickle.load(buf)
@@ -39,7 +39,7 @@ def test_reduce_generator():
     gen = sample_generator()
     assert next(gen) == 1
     buf = io.BytesIO()
-    pickler = create_pickler(buf)
+    pickler = Pickler(buf)
     dump(pickler, gen)
 
     buf.seek(0)
@@ -56,36 +56,28 @@ def test_reduce_generator():
 def test_load_basic_object():
     buf = io.BytesIO()
     obj = {"a": 1, "b": 2}
-    pickler = create_pickler(buf)
+    pickler = Pickler(buf)
     threads = dump(pickler, obj)
     buf.seek(0)
-    loaded = load(buf, threads)
+    loaded, _ = load(buf, threads)
     assert loaded == obj
 
 
 def test_load_with_threads():
     buf = io.BytesIO()
-    thread = Thread(target=lambda: None)
-    thread.start()
-    thread.join()
+    thread = Thread()
     obj = {"thread": thread}
-    thread_ids = set()
 
-    def persist_thread(t: Thread):
-        tid = id(t)
-        thread_ids.add(tid)
-        return tid
-
-    persist_mapping = {Thread: persist_thread}
-    pickler = create_pickler(buf, persist_mapping)
+    pickler = Pickler(buf)
     _threads = dump(pickler, obj)
     buf.seek(0)
-    assert id(thread) in thread_ids
+    assert Thread in _threads
+    assert id(thread) in _threads[Thread]
 
-    thread_stub = 42
-    objs = {id(thread): thread_stub}
-    loaded = load(buf, objs)
+    loaded, objs = load(buf, _threads)
     assert "thread" in loaded
+    assert id(thread) in objs
+    thread_stub = objs[id(thread)]
     assert loaded["thread"] is thread_stub
 
 
@@ -97,11 +89,11 @@ def test_load_with_generator():
     gen = sample_generator()
     assert next(gen) == 1
     buf = io.BytesIO()
-    pickler = create_pickler(buf)
+    pickler = Pickler(buf)
     threads = dump(pickler, gen)
 
     buf.seek(0)
-    loaded = load(buf, threads)
+    loaded, _ = load(buf, threads)
     assert isinstance(loaded, Generator)
     assert next(loaded) == 2
     with pytest.raises(StopIteration):

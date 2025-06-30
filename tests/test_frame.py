@@ -33,14 +33,14 @@ def test_capture_with_analyzer():
 
     assert add(1, 1) == 2
     assert isinstance(frame_, FunctionFrameCocoon)
-    cocoon = frame_.clone()
+    cocoon, _ = objects.copy(frame_)
     result, err = cocoon.spawn().evaluate()
     assert result == 2
     assert err is None
 
     # try different arguments
     assert add(3, 4) == 7
-    cocoon = frame_.clone()
+    cocoon, _ = objects.copy(frame_)
     assert isinstance(frame_, FunctionFrameCocoon)
     result, err = cocoon.spawn().evaluate()
     assert result == 7
@@ -78,7 +78,7 @@ def test_save_cocoon():
         return cocoon, "hello"
 
     c1, ret1 = capture_frame()
-    c2 = objects.copy(c1)
+    c2, _ = objects.copy(c1)
     (c3, ret2), err = c2.spawn().evaluate(c1)
 
     assert err is None
@@ -96,7 +96,7 @@ def test_seg():
         return cocoon, "hello"
 
     c1, ret1 = capture_frame()
-    c2 = objects.copy(c1)
+    c2, _ = objects.copy(c1)
     assert isinstance(c2, FunctionFrameCocoon)
     (c3, ret2), err = c2.spawn().evaluate(c1)
 
@@ -145,8 +145,8 @@ def test_raise_exception():
     assert inner_cocoon is not None
 
     frames = [outer_cocoon, inner_cocoon]
-    evaluate(objects.copy(frames))  # first
-    evaluate(objects.copy(frames))  # second
+    evaluate(objects.copy(frames)[0])  # first
+    evaluate(objects.copy(frames)[0])  # second
 
 
 def test_handled_exception():
@@ -163,7 +163,7 @@ def test_handled_exception():
             return (cocoon, ts), "hello"
 
     (c1, ts), ret1 = capture_frame()
-    c2 = c1.clone()
+    c2, _ = objects.copy(c1)
     interpreter.restore_thread_state(ts)
     c2.spawn().evaluate(c2)
 
@@ -219,7 +219,7 @@ def test_spawn_with_generator_frame():
     # Create a snapshot of the generator frame
     gen = generator_function()
     cocoon = next(gen)
-    cocoon = cocoon.clone()
+    cocoon, _ = objects.copy(cocoon)
     # Spawn a LiveGeneratorFrame from the cocoon
     live_frame = cocoon.spawn()
     assert isinstance(live_frame, LiveGeneratorFrame)
@@ -258,7 +258,7 @@ def test_snapshot_with_context_manager(capsys):
                 inspect.currentframe(), False, analyzer.analyze_stack_top
             )
             if frame_:
-                new_frame_ = frame_.clone()
+                new_frame_, _ = objects.copy(frame_)
                 assert new_frame_.stack[0] is not frame_.stack[0]
                 return new_frame_
             else:

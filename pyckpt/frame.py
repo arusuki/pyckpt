@@ -1,11 +1,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from types import FrameType, FunctionType
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Type
+from typing import Any, Callable, Generator, List, Optional, Tuple
 
-from pyckpt import interpreter, objects
+from pyckpt import interpreter
 from pyckpt.interpreter import EvaluateResult, ExceptionStates, get_generator
-from pyckpt.objects import Mapping
 
 Analyzer = Callable[[FunctionType, int, bool], int]
 
@@ -112,13 +111,6 @@ class FunctionFrameCocoon:
             prev_instr_offset=self.prev_instr_offset,
         )
 
-    def clone(
-        self,
-        object_table: Optional[Dict] = None,
-        persist_mapping: Optional[Dict[Type, Mapping]] = None,
-    ) -> "FunctionFrameCocoon":
-        return objects.copy(self, objects=object_table, persist_mapping=persist_mapping)
-
 
 @dataclass(frozen=True)
 class GeneratorFrameCocoon:
@@ -130,12 +122,6 @@ class GeneratorFrameCocoon:
             self.gen,
             self.is_leaf,
         )
-
-    def clone(self):
-        object_table: Optional[Dict] = None
-        persist_mapping: Optional[Dict[Type, Mapping]] = None
-        return objects.copy(self, objects=object_table, persist_mapping=persist_mapping)
-
 
 def snapshot_from_frame(
     frame: FrameType,

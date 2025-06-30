@@ -207,7 +207,7 @@ def _offset_without_cache(
 
 
 # FIXME: these version-dependent functions should be placed separately.
-CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE']
+CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE', 'RESUME']
 CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
 def is_call_instr(opcode: int):
     return opcode in CALL_CODES
@@ -343,6 +343,7 @@ def save_thread_state(thread: Thread):
         raise RuntimeError("capture a thread while exception is happening")
     exc = _PyErr_GetHandledException(tstate)
     exc_obj = <object> exc if exc != NULL else None
+    # FIXME: exception states should be a linked list of stacked exception_info
     return {
         "exception": exc_obj
     }

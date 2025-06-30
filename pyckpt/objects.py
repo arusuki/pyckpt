@@ -1,8 +1,11 @@
 import copyreg
+import multiprocessing
 from io import BytesIO
+from multiprocessing import Process
 from queue import SimpleQueue
+from threading import Thread
 from types import FrameType, NoneType
-from typing import IO, Any, Callable, Dict, Generator, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, Generator, List, Set, Tuple, Type
 
 import dill
 
@@ -54,72 +57,86 @@ def reduce_simple_queue(sq: SimpleQueue):
         return q
     return make_simple_queue, (snapshot_simple_queue(sq),)
 
+class FakeQueue():
+    def __init__(self):
+        pass
 
-def new_snapshot_registry() -> Registry:
+    def __getattribute__(self, _name):
+        raise NotImplementedError(
+            "accessing multiprocessing.Queue after respawn"
+        )
+
+
+
+def reduce_multiprocessing_queue(q: multiprocessing.Queue):
+    return FakeQueue, ()
+
+
+def dispatch_table() -> Registry:
     return {
         FrameType: reduce_as_none,  # TODO: support frame types
         get_generator_type(): reduce_generator,
         NullObjectType: reduce_null_object,
         SimpleQueue: reduce_simple_queue,
+        type(multiprocessing.Queue()): reduce_multiprocessing_queue,
     }
 
+PersistType = (Thread, Process)
+PersistedObjects = Dict[Type, Set[int]]
 
 class Pickler(dill.Pickler):
-    def __init__(self, file, persistent_mapping: Dict[Type, Mapping], *args, **kwds):
+    def __init__(self, file, *args, **kwds):
         super().__init__(file, *args, **kwds)
-        self._pm = persistent_mapping if persistent_mapping else {}
+        self._persisted: PersistedObjects = {}
+        self.dispatch_table = copyreg.dispatch_table.copy()
+        self.dispatch_table.update(dispatch_table())
+        for tp in PersistType:
+            self._persisted[tp] = set()
 
     def persistent_id(self, obj):
         obj_type = type(obj)
-        if obj_type in self._pm:
-            return self._pm[obj_type](obj)
+        if obj_type in PersistType:
+            obj_id = id(obj)
+            self._persisted[obj_type].add(obj_id)
+            return obj_id
         return None
-
-    def persist_mapping(self):
-        return self._pm
-
-
-def create_pickler(
-    file: IO[bytes],
-    persist_mapping: Optional[Dict[Type, Mapping]] = None,
-) -> Pickler:
-    return Pickler(file=file, persistent_mapping=persist_mapping)
-
-
-def dump(
-    pickler: Pickler,
-    cocoon: Any,
-):
-    dispatch_table = copyreg.dispatch_table.copy()
-    registry = new_snapshot_registry()
-    for _type, _entry in registry.items():
-        dispatch_table[_type] = _entry
-    pickler.dispatch_table = dispatch_table
-    pickler.dump(cocoon)
-
+    
+    def consume_persisted(self) -> PersistedObjects:
+        self._persisted, persisted = None, self._persisted
+        return persisted
 
 class Unpickler(dill.Unpickler):
-    def __init__(self, file, objects, *args, **kwds):
+    def __init__(
+        self, 
+        file,
+        objects: PersistedObjects,
+        *args,
+        **kwds,
+    ):
         super().__init__(file, *args, **kwds)
-        self._objects = objects
+        pool: Dict[int, Any] = {}
+        for tp, obj_ids in objects.items():
+            for obj_id in obj_ids:
+                pool[obj_id] = object.__new__(tp)
+        self._pool = pool
 
     def persistent_load(self, pid: int):
-        return self._objects[pid]
+        return self._pool[pid]
 
+    def object_pool(self) -> Dict[int, Any]:
+        return self._pool
 
-def load(file: IO[bytes], objects: Dict) -> Any:
-    unpickler = Unpickler(file, objects=objects)
-    return unpickler.load()
+def dump(file, cocoon) -> PersistedObjects:
+    pickler = Pickler(file)
+    pickler.dump(cocoon)
+    return pickler.consume_persisted()
 
+def load(file, objects: PersistedObjects):
+    unpickler = Unpickler(file, objects)
+    return unpickler.load(), unpickler.object_pool()
 
-def copy(
-    cocoon: Any,
-    objects: Optional[Dict] = None,
-    persist_mapping: Optional[Dict[Type, Mapping]] = None,
-):
+def copy(cocoon: Any):
     buffer = BytesIO()
-    pickler = create_pickler(buffer, persist_mapping)
-    dump(pickler, cocoon)
+    persist = dump(buffer, cocoon)
     buffer.seek(0)
-    objects = objects if objects else {}
-    return load(buffer, objects)
+    return load(buffer, persist)
