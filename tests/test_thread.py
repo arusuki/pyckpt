@@ -17,6 +17,8 @@ from pyckpt.thread import (
     ThreadCocoon,
     _lock_acquire,
     _waiting_threads,
+    mark_stop,
+    mark_truncate,
     snapshot_from_thread,
 )
 
@@ -424,3 +426,26 @@ def test_thread_capture_with_dump(capsys):
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
     assert result.out.count(s) == 1
+
+def test_thread_mark_truncate():
+    def foo():
+        s, err = snapshot_from_thread(threading.current_thread())
+        assert not err
+        return s
+
+    captured = mark_stop(foo)
+    assert captured is not None
+
+    def test_truncate():
+        def outter():
+            return inner()
+
+        def inner():
+            return mark_truncate(foo)
+        
+        return outter()
+    
+    s = mark_stop(test_truncate)
+    assert isinstance(s, ThreadCocoon)
+    assert len(s.non_leaf_frames) == 2
+

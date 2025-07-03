@@ -207,7 +207,7 @@ def _offset_without_cache(
 
 
 # FIXME: these version-dependent functions should be placed separately.
-CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE', 'RESUME']
+CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE']
 CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
 def is_call_instr(opcode: int):
     return opcode in CALL_CODES
@@ -296,6 +296,9 @@ cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
     # Ignore the 'return value' of the ongoing 'CALL' instruction.
     if not is_leaf:
         stacksize -= 1
+    elif is_return:
+        stacksize += 1 # snapshot the return value
+
     generator: Optional[Generator] = None
     if is_generator > 0:
         generator = <object> generator_of(frame)

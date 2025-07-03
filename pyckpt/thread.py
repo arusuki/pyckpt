@@ -65,6 +65,19 @@ def _construct_waiting_threads(suspended: Dict[Thread, FrameType]):
     frames = sys._current_frames()
     return {t: frames[t.ident] for t in _waiting_threads if t not in suspended}
 
+T = TypeVar("T")
+
+def mark_truncate(func: Callable[..., T], *arg, **kwargs) -> Optional[T] :
+    return func(*arg, **kwargs)
+
+def mark_stop(func: Callable[..., T], *arg, **kwargs) -> Optional[T] :
+    return func(*arg, **kwargs)
+
+
+CODE_MARK_TRUNCATE = mark_truncate.__code__
+CODE_MARK_STOP = mark_stop.__code__
+
+
 
 class LiveThread:
     def __init__(
@@ -133,11 +146,13 @@ class ThreadCocoon:
         non_leaf_frames: List[FrameCocoon],
         frame: FrameType,
         max_frames: Optional[int],
-    ) -> List[FrameCocoon]:
+    ) -> bool:
+        trunc_position = 0
         current_frames = 1
         stop_code = {
             Thread.run.__code__,
             Process.run.__code__,
+            CODE_MARK_STOP,
         }
         while frame.f_back is not None:
             if max_frames and current_frames >= max_frames:
@@ -145,8 +160,13 @@ class ThreadCocoon:
             frame = frame.f_back
             if frame.f_code in stop_code:
                 break
+            elif frame.f_code is CODE_MARK_TRUNCATE:
+                trunc_position = len(non_leaf_frames)
+                continue
             non_leaf_frames.append(snapshot_from_frame(frame, False, analyze_stack_top))
             current_frames += 1
+        non_leaf_frames[:trunc_position] = []
+        return trunc_position != 0
 
     def spawn(self, handle: Thread) -> LiveThread:
         live_thread = LiveThread(
@@ -162,6 +182,7 @@ def snapshot_from_thread(
     t: Thread,
     max_frames: Optional[int] = None,
     frame: Optional[FrameType] = None,
+    capture_other = False,
 ) -> Result[ThreadCocoon, Exception]:
     """
     Either `(t is threading.current_thread()) == True` or called by op in THE_WORLD()`
@@ -172,7 +193,7 @@ def snapshot_from_thread(
         if frame is None:
             frame = sys._current_frames()[t.ident]
 
-        last_frame = snapshot_from_frame(frame, False, analyze_stack_top)
+        last_frame = snapshot_from_frame(frame, capture_other, analyze_stack_top)
         if last_frame is None:  # return from LiveThread
             return None
 
@@ -187,8 +208,11 @@ def snapshot_from_thread(
             last_frame.prev_instr_offset -= (
                 1 + bytecode.ConcreteInstr("CALL", 0).use_cache_opcodes()
             )
+        if frame.f_back.f_code is not CODE_MARK_TRUNCATE:
+            truncated = ThreadCocoon.extract_frames(non_leaf_frames, frame, max_frames)
+            if truncated:
+                last_frame = non_leaf_frames.pop(0)
 
-        ThreadCocoon.extract_frames(non_leaf_frames, frame, max_frames)
         exception_states = interpreter.save_thread_state(t)
         return (ThreadCocoon(id(t), last_frame, non_leaf_frames, exception_states), None)
     except Exception as e: 
@@ -198,7 +222,7 @@ def snapshot_from_thread(
         logger.debug("backtrace of thread under snapshot:")
         while frame:
             logger.debug(f"Frame: {frame.f_code.co_name} in {frame.f_code.co_filename}:{frame.f_lineno}")
-            frame = frame.f_back  # 获取上一级 frame
+            frame = frame.f_back
         logger.debug("captured frames:") 
         for f in chain(non_leaf_frames, (last_frame,)):
             logger.debug("%s", f)
