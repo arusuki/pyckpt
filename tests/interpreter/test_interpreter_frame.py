@@ -7,7 +7,7 @@ from typing import Generator, Optional
 import pytest
 from bytecode import Bytecode, Instr
 
-from pyckpt.interpreter import NullObject
+from pyckpt.interpreter import NullObject, EvaluateResult
 from pyckpt.interpreter import frame as _frame
 
 
@@ -161,3 +161,22 @@ def test_reraise():
         _frame.restore_thread_state({"exception": e})
         raise
     _frame.restore_thread_state({"exception": None})
+
+def test_eval_traceback():
+    
+    def foo():
+        raise RuntimeError("hello")
+
+    def bar():
+        pass
+
+    eval_result = _frame.eval_frame_at_lasti(foo, [], [], True)
+    assert isinstance(eval_result, EvaluateResult)
+    ret, exc = eval_result
+    assert ret is NullObject
+    assert isinstance(exc, tuple)
+
+    eval_result = _frame.eval_frame_at_lasti(bar, [], [], True, exc_states=exc)
+    assert isinstance(eval_result, EvaluateResult)
+
+    print(eval_result[1])

@@ -1,3 +1,4 @@
+import logging
 import sys
 import threading
 from contextlib import contextmanager
@@ -8,6 +9,7 @@ from typing import Callable, Dict, Generic, Optional, TypeVar
 
 import forbiddenfruit as patch
 
+from pyckpt import configure_logging
 from pyckpt.thread import (
     LiveThread,
     LockType,
@@ -15,11 +17,17 @@ from pyckpt.thread import (
     ThreadCocoon,
     _lock_acquire,
     _waiting_threads,
+    mark_stop,
+    mark_truncate,
     snapshot_from_thread,
 )
 
+import pyckpt.objects as objects
+from pyckpt.objects import PersistedObjects
+
 T = TypeVar("T")
 
+configure_logging(logging.DEBUG)
 
 class SingletonValue(Generic[T]):
     _instance: Optional["SingletonValue"] = None
@@ -44,16 +52,19 @@ class SingletonValue(Generic[T]):
 
 def test_thread_capture(capsys):
     c: Optional[ThreadCocoon] = None
-    objs: Optional[Dict] = {}
+    objs: Optional[Dict] = None
 
     s = "hello_world"
 
     def test():
         nonlocal c
+        nonlocal objs
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
-            c = thread_cocoon.clone(objs)
+            thread_cocoon, err = thread_cocoon
+            assert err is None
+            c, objs = objects.copy(thread_cocoon)
         print(s)
 
     t = threading.Thread(target=test)
@@ -64,8 +75,8 @@ def test_thread_capture(capsys):
     assert result.out.count(s) == 1
     assert isinstance(c, ThreadCocoon)
     assert isinstance(objs, Dict)
-
     assert id(t) in objs
+
     live_thread: LiveThread = c.spawn(objs[id(t)])
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
@@ -85,8 +96,11 @@ def test_thread_capture_with_exception(capsys):
             raise RuntimeError("test")
         except RuntimeError:
             thread_cocoon = snapshot_from_thread(threading.current_thread())
+            if thread_cocoon is not None:
+                thread_cocoon, err = thread_cocoon
+                assert err is None
         if thread_cocoon is not None:
-            c = thread_cocoon.clone(objs)
+            c, objs = objects.copy(thread_cocoon)
         print(s)
 
     t = threading.Thread(target=test)
@@ -110,9 +124,13 @@ class ReturnValue:
     multi_capture: bool
 
 def test_thread_multiple_captures(capsys):
+    @dataclass
+    class ReturnValue:
+        multi_capture: bool
+        cocoon: Optional[ThreadCocoon]
+        objs: Optional[PersistedObjects]
 
-    objs: Optional[Dict] = {}
-    ret = SingletonValue(ReturnValue(None, False))
+    ret = SingletonValue(ReturnValue(False, None, None))
 
     s = "hello_world"
     exc = "executed"
@@ -122,13 +140,21 @@ def test_thread_multiple_captures(capsys):
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
-            cocoon = thread_cocoon.clone(objs)
+            thread_cocoon, err = thread_cocoon
+            assert err is None
+            cocoon, objs = objects.copy(thread_cocoon)
             ret.get_value().cocoon = cocoon
+            ret.get_value().objs = objs
 
         if ret.get_value().multi_capture:
             _thread_cocoon = snapshot_from_thread(threading.current_thread())
             if _thread_cocoon is not None:
-                ret.get_value().cocoon = _thread_cocoon.clone(objs)
+                if _thread_cocoon:
+                    _thread_cocoon, err = _thread_cocoon
+                    assert err is None
+                cocoon, objs = objects.copy(_thread_cocoon)
+                ret.get_value().cocoon = cocoon
+                ret.get_value().objs = objs
             print(exc)
 
         print(s)
@@ -139,13 +165,13 @@ def test_thread_multiple_captures(capsys):
 
     result = capsys.readouterr()
     assert result.out.count(s) == 1
-    assert isinstance(ret.get_value().cocoon, ThreadCocoon)
-    assert isinstance(objs, Dict)
-
-    assert id(t) in objs
     cocoon = ret.get_value().cocoon
-    live_thread: LiveThread = cocoon.spawn(objs[id(t)])
+    objs = ret.get_value().objs
+    assert isinstance(cocoon, ThreadCocoon)
+    assert isinstance(objs, Dict)
+    assert id(t) in objs
 
+    live_thread: LiveThread = cocoon.spawn(objs[id(t)])
     ret.get_value().multi_capture = True
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
@@ -153,6 +179,7 @@ def test_thread_multiple_captures(capsys):
     assert result.out.count(exc) == 1
 
     cocoon = ret.get_value().cocoon
+    objs = ret.get_value().objs
     live_thread = cocoon.spawn(objs[id(live_thread.handle)])
 
     ret.get_value().multi_capture = False
@@ -270,7 +297,7 @@ def test_stop_the_world():
 
 def test_star_platinum_capture_waiting(capsys):
     start = threading.Event()
-    objs = {}
+    objs = None
 
     def no_op():
         pass
@@ -283,15 +310,22 @@ def test_star_platinum_capture_waiting(capsys):
         assert len(waiting_threads) == 1
         t, frame = next(iter(waiting_threads.items()))
         c = snapshot_from_thread(t, frame=frame)
-        return c.clone(objs)
+        if not c:
+            return (None, RuntimeError("snapshot return `None` value"))
+        c, err = c
+        if err:
+            return (c, err)
+        return objects.copy(c), None
 
     t = threading.Thread(target=thread_func)
 
     with _replace(LockType, "acquire", _lock_acquire):
         t.start()
         with _guard(start, no_op):
-            c = StarPlatinum(op, timeout=1.0).THE_WORLD()
-        assert isinstance(c, ThreadCocoon)
+            ret, err = StarPlatinum(op, timeout=1.0).THE_WORLD()
+        assert not err
+        assert isinstance(ret, tuple) and len(ret) == 2
+        c, objs = ret
         t.join()
 
     result = capsys.readouterr()
@@ -313,7 +347,7 @@ def test_star_platinum_capture_waiting(capsys):
 
 def test_multiple_frame_capture(capsys):
     c: Optional[ThreadCocoon] = None
-    objs: Optional[Dict] = {}
+    objs = None
 
     s1 = "foo"
     s2 = "bar"
@@ -321,10 +355,14 @@ def test_multiple_frame_capture(capsys):
 
     def foo():
         nonlocal c
+        nonlocal objs
 
         thread_cocoon = snapshot_from_thread(threading.current_thread())
         if thread_cocoon is not None:
-            c = thread_cocoon.clone(objs)
+            if thread_cocoon:
+                thread_cocoon, err = thread_cocoon
+                assert err is None
+            c,objs = objects.copy(thread_cocoon)
         print(s1)
 
     def bar():
@@ -356,3 +394,58 @@ def test_multiple_frame_capture(capsys):
     live_thread.evaluate(timeout=1.0)
     result = capsys.readouterr()
     _check_result(result.out)
+
+
+def test_thread_capture_with_dump(capsys):
+    c: Optional[ThreadCocoon] = None
+    objs: Optional[Dict] = {}
+
+    s = "hello_world"
+
+    def test():
+        nonlocal c, objs
+
+        thread_cocoon = snapshot_from_thread(threading.current_thread())
+        if thread_cocoon is not None:
+            thread_cocoon, err = thread_cocoon
+            assert err is None
+            c, objs= objects.copy(thread_cocoon)
+        print(s)
+
+    t = threading.Thread(target=test)
+    t.start()
+    t.join()
+
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+    assert isinstance(c, ThreadCocoon)
+    assert isinstance(objs, Dict)
+
+    assert id(t) in objs
+    live_thread: LiveThread = c.spawn(objs[id(t)])
+    live_thread.evaluate(timeout=1.0)
+    result = capsys.readouterr()
+    assert result.out.count(s) == 1
+
+def test_thread_mark_truncate():
+    def foo():
+        s, err = snapshot_from_thread(threading.current_thread())
+        assert not err
+        return s
+
+    captured = mark_stop(foo)
+    assert captured is not None
+
+    def test_truncate():
+        def outter():
+            return inner()
+
+        def inner():
+            return mark_truncate(foo)
+        
+        return outter()
+    
+    s = mark_stop(test_truncate)
+    assert isinstance(s, ThreadCocoon)
+    assert len(s.non_leaf_frames) == 2
+

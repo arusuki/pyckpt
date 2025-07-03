@@ -1,5 +1,7 @@
+from dataclasses import dataclass
 import logging
 from types import CodeType
+from typing import Optional, Tuple, TypeVar
 
 from bytecode import Bytecode, ControlFlowGraph, format_bytecode, Instr
 
@@ -7,6 +9,30 @@ from bytecode import Bytecode, ControlFlowGraph, format_bytecode, Instr
 def format_instr(instr: Instr):
     return f"{instr.name}, {instr.arg} {instr.location}"
 
+T = TypeVar("T")
+
+E = TypeVar("E")
+
+Result = Optional[Tuple[Optional[T], Optional[E]]]
+NotNullResult = Tuple[Optional[T], Optional[E]]
+
+@dataclass
+class CodePosition:
+    code: CodeType 
+    offset: int
+    reason: str
+
+class BytecodeParseError(Exception):
+    def __init__(self, pos: CodePosition):
+        self._pos: CodePosition = pos
+
+    def consume(self) -> CodePosition:
+        pos = self._pos
+        self.pos = None
+        return pos
+
+    def pos(self) -> CodePosition:
+        return self._pos
 
 def dump_code_and_offset(
     logger: logging.Logger,
@@ -35,4 +61,9 @@ def dump_code_and_offset(
                 ins for ins in code_array if isinstance(ins, Instr)
             )
         )
+    )
+
+def dump_code_position(logger: logging.Logger, pos: CodePosition, show_caches: bool):
+    return dump_code_and_offset(
+        logger, pos.code, pos.offset, pos.reason, show_caches
     )
