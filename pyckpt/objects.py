@@ -5,7 +5,7 @@ from multiprocessing import Process
 from queue import SimpleQueue
 from threading import Thread
 from types import FrameType, NoneType
-from typing import Any, Callable, Dict, Generator, List, Set, Tuple, Type
+from typing import Any, Callable, Dict, Generator, List, Set, Tuple, Type, TypeVar
 
 import dill
 
@@ -135,7 +135,9 @@ def load(file, objects: PersistedObjects):
     unpickler = Unpickler(file, objects)
     return unpickler.load(), unpickler.object_pool()
 
-def copy(cocoon: Any):
+T = TypeVar("T")
+
+def copy(cocoon: T) -> Tuple[T, Dict[int, Any]]:
     buffer = BytesIO()
     persist = dump(buffer, cocoon)
     buffer.seek(0)
