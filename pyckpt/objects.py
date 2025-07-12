@@ -17,7 +17,6 @@ from pyckpt.interpreter.generator import (
     snapshot_generator,
     snapshot_generator_frame,
 )
-
 from pyckpt.interpreter.objects import snapshot_simple_queue
 
 None_PID = 0
