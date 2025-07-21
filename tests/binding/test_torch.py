@@ -1,8 +1,9 @@
 from io import BytesIO
 
+import numpy
 import pytest
-import torch.nn as nn
 import torch
+import torch.nn as nn
 
 from pyckpt import objects
 from pyckpt.binding.torch import cuda_get_device_properties
@@ -42,4 +43,39 @@ def test_torch_cuda_device_property():
     property = cuda_get_device_properties()
     buffer = BytesIO()
     objects.dump(buffer, property)
+
+def test_torch_tensor_to_numpy():
+    t = torch.tensor(range(12)).reshape(3, 4)
+    n = t.numpy()
+    assert torch.is_tensor(n.base)
+
+    t[2][2] = 114
+    assert n[2][2] == 114
+
+    n[2][2] = 115
+    assert t[2][2] == 115
+
+    slice = n[2]
+    slice[2] = 116
+    assert t[2][2] == 116
+
+    objects.get_leaf_base(slice)[2][2] = 117
+    assert t[2][2] == 117
+
+    assert objects.get_leaf_base(slice).untyped_storage().data_ptr() == \
+        t.untyped_storage().data_ptr()
+
+def test_torch_dump_tensor_numpy():
+    t = torch.tensor(range(12)).reshape(3, 4)
+    n = t.numpy()
+    assert torch.is_tensor(n.base)
+    assert n.base.untyped_storage().data_ptr() == \
+            t.untyped_storage().data_ptr()
+    
+    (new_t, new_n), _ = objects.copy((t, n))
+    assert isinstance(new_t, torch.Tensor)
+    assert isinstance(new_n, numpy.ndarray)
+    assert torch.is_tensor(new_n.base)
+    assert new_n.base.untyped_storage().data_ptr() == \
+            new_t.untyped_storage().data_ptr()
 
