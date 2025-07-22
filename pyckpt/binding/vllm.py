@@ -3,6 +3,7 @@ from io import BytesIO
 
 from vllm.attention.layer import Attention
 from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
+from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 import vllm.v1.engine.detokenizer as detokenizer
@@ -56,24 +57,20 @@ def remove_kv_cache_manager(core: EngineCore, cache_blocks: list[list]):
     scheduler = core.scheduler
     assert isinstance(scheduler, Scheduler)
     manager = scheduler.kv_cache_manager
-    block_pool = scheduler.kv_cache_manager.block_pool
-    manager.block_pool = None
-    manager.coordinator.block_pool = None
-
-    assert len(manager.coordinator.single_type_managers) == 1
-    full_attn_manager = manager.coordinator.single_type_managers[0]
-    full_attn_manager.block_pool = None
-
-    scheduler.kv_cache_manager = manager, [
-        block_pool.num_gpu_blocks,
-        block_pool.enable_caching,
-        block_pool.enable_kv_cache_events,
-        block_pool.cached_block_hash_to_block,
-    ], cache_blocks
+    caching_hash_algo = "sha256" if manager.caching_hash_fn is sha256 else "builtin"
+    manager_args = {
+        "kv_cache_config":         manager.kv_cache_config,
+        "max_model_len":           manager.max_model_len,
+        "enable_caching":          manager.enable_caching,
+        "caching_hash_algo":       caching_hash_algo,
+        "use_eagle":               manager.use_eagle,
+        "log_stats":               manager.log_stats,
+        "enable_kv_cache_events":  manager.block_pool.enable_kv_cache_events,
+    }
+    scheduler.kv_cache_manager = type(manager), manager_args, cache_blocks
     try:
         yield
     finally:
-        manager.block_pool = block_pool
         scheduler.kv_cache_manager = manager
 
 @contextmanager
@@ -224,16 +221,9 @@ def rebuild_engine(dumped_core: bytes, objs: dict):
 
     rebuild_core_executor(core)
 
-    manager, pool_args, cache_blocks = core.scheduler.kv_cache_manager
+    manager_cls, manager_args, cache_blocks = core.scheduler.kv_cache_manager
+    manager = manager_cls(**manager_args)
     assert isinstance(manager, KVCacheManager)
-    cached = pool_args.pop()
-    block_pool = BlockPool(*pool_args)
-    manager.block_pool = block_pool 
-    manager.coordinator.block_pool = block_pool
-    block_pool.cached_block_hash_to_block = cached
-    assert len(manager.coordinator.single_type_managers) == 1
-    full_attn_manager = manager.coordinator.single_type_managers[0]
-    full_attn_manager.block_pool = block_pool
 
     core.scheduler.kv_cache_manager = manager
     for req in core.scheduler.requests:
