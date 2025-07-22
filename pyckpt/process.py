@@ -80,6 +80,9 @@ def extract_threads(
     all_threads = running | waiting
     threads: List[ThreadCocoon] = []
     for t, frame in all_threads.items():
+        # for now, disable daemon thread capture
+        if t.daemon:
+            continue
         ret = snapshot_from_thread(t, frame=frame, capture_other=True)
         if not ret:
             return (None, RuntimeError("recover at this function is not allowed"))

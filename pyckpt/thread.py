@@ -275,7 +275,7 @@ class StarPlatinum(Generic[T]):
                 self._reach(1)
                 self._all_released.wait()
                 return None
-            num_threads = sum(1 for _ in threading.enumerate())
+            num_threads = sum(1 for t in threading.enumerate() if not t.daemon)
             num_threads -= 1 + len(_waiting_threads)
             assert num_threads >= 0, "invalid thread count"
             self._reach(-num_threads)
@@ -283,6 +283,7 @@ class StarPlatinum(Generic[T]):
                 raise RuntimeError("timeout on waiting thread to suspend")
             _wait = _construct_waiting_threads(self._threads)
             try:
+                print("threads: ", self._threads)
                 self._ret, self.exc = self._op(self._threads, _wait)
             except Exception as e:
                 logger.error(f"`StarPlatinum._op` raise exception {e}")

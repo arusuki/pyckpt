@@ -6,8 +6,16 @@ from threading import Thread
 from typing import Generator
 
 import pytest
+import torch
 
-from pyckpt.objects import dump, load, Pickler
+from pyckpt.objects import (
+    Pickler,
+    copy,
+    dump,
+    load,
+    load_untyped_storages,
+    save_untyped_storages,
+)
 
 
 def test_dump_basic_object():
@@ -112,4 +120,43 @@ def test_reduce_simple_queue():
     assert isinstance(loaded, SimpleQueue)
     assert loaded.get(block=False) == 42
     assert loaded.get(block=False) == 43
+
+def test_save_tensor_storage_dump_load():
+    x = torch.tensor(range(12)).reshape(3, 4)
+    if torch.cuda.is_available():
+        x = x.cuda()
+    file = io.BytesIO()
+    s = io.BytesIO()
+    stores = dump(file, x)
+    save_untyped_storages(s, stores["storage"])
+
+    s.seek(0)
+    file.seek(0)
+    stores["storage"] = load_untyped_storages(s)
+    new_x, _ = load(file, stores)
+
+    assert torch.equal(x, new_x)
+    assert x.device == new_x.device
+
+def test_save_tensor_storage_copy():
+    x = torch.tensor(range(12)).reshape(3, 4)
+    x_slice = x[2]
+    (new_x, new_x_slice), _ = copy((x, x_slice))
+
+    assert new_x.untyped_storage() == \
+      new_x_slice.untyped_storage()
+
+    assert torch.equal(x, new_x)
+    assert torch.equal(x_slice, new_x_slice)
+
+def test_save_multiple_tensors():
+    x = torch.tensor(range(12)).reshape(3, 4)
+    y = torch.tensor(range(16)).reshape(4, 4)
+
+    assert x.untyped_storage()._cdata != y.untyped_storage()._cdata
+
+    file = io.BytesIO()
+    s = io.BytesIO()
+    stores = dump(file, (x, y))["storage"]
+    assert len(stores) == 2
 
