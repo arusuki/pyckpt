@@ -13,12 +13,15 @@ from tokenizers.decoders import DecodeStream
 from torch.multiprocessing import Queue
 from transformers import AutoTokenizer
 from vllm.engine.arg_utils import EngineArgs
+from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from pyckpt import objects
 from pyckpt.binding import torch as patch_torch
@@ -39,11 +42,14 @@ from tests.utils import (
     save_random_states,
 )
 
-MODEL_NAME =  "/home/yuuka/testp/Qwen2.5-7B-Instruct-GPTQ-Int8"
+# MODEL_NAME =  "/home/yuuka/testp/Qwen2.5-7B-Instruct-GPTQ-Int8"
+MODEL_NAME =  "/docker/data/HF_MODELS/Qwen2.5-7B-Instruct-GPTQ-Int8"
 # MODEL_NAME =  "/home/yuuka/testp/opt-125m"
 PROMPT = "implement quick sort in C programming language: "
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
+
+print(f"prompt tokens: {len(PROMPT_TOKENS)}")
 
 def make_request() -> EngineCoreRequest:
     return EngineCoreRequest(
@@ -184,12 +190,32 @@ def _step_engine_and_process(
     for _ in range(num_step):
         outs = core.step()[0].get(0)
         assert outs.outputs is not None
+        # print(outs.outputs)
         processed_outputs = processor.process_outputs(outs.outputs)
         assert len(processed_outputs.request_outputs) == 1
         request_output = processed_outputs.request_outputs[0]
         output.write(request_output.outputs[0].text)
 
+    print_req_blocks(core)
+
     return processor, save_random_states(), output
+
+def print_req_blocks(core: EngineCore):
+    scheduler = core.scheduler
+    assert isinstance(scheduler, Scheduler)
+    executor = core.model_executor
+    assert isinstance(executor, UniProcExecutor)
+    model_runner = executor.driver_worker.worker.model_runner
+    assert isinstance(model_runner, GPUModelRunner)
+    cached_req_states = model_runner.requests
+
+    for req, cached_req in zip(scheduler.requests, cached_req_states.values()):
+        print(
+            "cache blocks(manager): ", scheduler.kv_cache_manager.get_block_ids(req)
+        )
+        print(
+            "cache blocks(model_runner): ", cached_req.block_ids
+        )
 
 
 def print_cache_blocks(cache_blocks: list[list[tuple[int, torch.Tensor]]]):
@@ -252,7 +278,7 @@ def test_vllm_engine_step_after_dump():
     print(interrupted)
 
     # at this time we cannot ensure 100% state recover
-    # assert reference == interrupted
+    assert reference == interrupted
 
 def _get_cache_blocks(q: Queue):
     core = _make_engine_core()

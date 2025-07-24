@@ -1,5 +1,8 @@
+from collections import defaultdict
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from io import BytesIO
+from typing import Type
 
 from vllm.attention.layer import Attention
 from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
@@ -9,7 +12,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 import vllm.v1.engine.detokenizer as detokenizer
 from tokenizers.decoders import DecodeStream
 from vllm.executor.uniproc_executor import UniProcExecutor
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -18,6 +21,7 @@ from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environmen
 from vllm.worker.worker_base import WorkerWrapperBase
 
 from pyckpt import objects
+from itertools import chain
 
 import torch
 
@@ -52,11 +56,26 @@ def remove_forward_config(core: EngineCore):
         config.static_forward_context = ctx
         
 
+@dataclass
+class CapturedKVCacheManager:
+    manager_cls: Type[KVCacheManager]
+    args: dict
+    cache_blocks: list[list]
+    manager_states: tuple[list[dict[str, list[KVCacheBlock]]], dict[str, int]]
+    cached_hash_to_block: dict[BlockHashWithGroupId, dict[int, KVCacheBlock]]
+    req_to_block_hashes: defaultdict
+
+
 @contextmanager
 def remove_kv_cache_manager(core: EngineCore, cache_blocks: list[list]):
     scheduler = core.scheduler
     assert isinstance(scheduler, Scheduler)
     manager = scheduler.kv_cache_manager
+    manager_states = [
+        (type_manager.req_to_blocks, type_manager.num_cached_block)
+        for type_manager in manager.coordinator.single_type_managers
+    ]
+
     caching_hash_algo = "sha256" if manager.caching_hash_fn is sha256 else "builtin"
     manager_args = {
         "kv_cache_config":         manager.kv_cache_config,
@@ -67,7 +86,15 @@ def remove_kv_cache_manager(core: EngineCore, cache_blocks: list[list]):
         "log_stats":               manager.log_stats,
         "enable_kv_cache_events":  manager.block_pool.enable_kv_cache_events,
     }
-    scheduler.kv_cache_manager = type(manager), manager_args, cache_blocks
+    scheduler.kv_cache_manager = CapturedKVCacheManager(
+        manager_cls=type(manager),
+        args = manager_args,
+        cache_blocks = cache_blocks,
+        manager_states = manager_states,
+        cached_hash_to_block = manager.block_pool.cached_block_hash_to_block,
+        req_to_block_hashes = manager.req_to_block_hashes,
+    )
+
     try:
         yield
     finally:
@@ -212,29 +239,43 @@ def rebuild_core_executor(core: EngineCore):
     model_runner.requests = requests
     core._initialize_kv_caches(core.vllm_config)
 
+def rebuild_core_kv_cache_manager(core: EngineCore):
+    captured = core.scheduler.kv_cache_manager
+    assert isinstance(captured, CapturedKVCacheManager)
+    manager = captured.manager_cls(**captured.args)
+
+    s_managers = manager.coordinator.single_type_managers
+    allocated_blocks: dict[int, KVCacheBlock] = {}
+    block_pool = manager.block_pool
+    num_groups = len(s_managers)
+    assert len(captured.manager_states) == num_groups
+    for s_manager, (req_to_block, num_cached_block) in \
+      zip(s_managers, captured.manager_states):
+        assert len(s_manager.req_to_blocks) == 0
+        s_manager.req_to_blocks = req_to_block
+        s_manager.num_cached_block = num_cached_block
+        for blocks in req_to_block.values():
+            allocated_blocks.update((block.block_id, block) for block in blocks)
+
+    for block_id, block in allocated_blocks.items():
+        old_block = manager.block_pool.blocks[block_id]
+        block_pool.free_block_queue.remove(old_block)
+        manager.block_pool.blocks[block_id] = block
+    
+    block_pool.cached_block_hash_to_block = captured.cached_hash_to_block
+    manager.req_to_block_hashes = captured.req_to_block_hashes
+    core.scheduler.kv_cache_manager = manager
+
+    set_cache_blocks(core, captured.cache_blocks)
+
 def rebuild_engine(dumped_core: bytes, objs: dict):
     untyped_stores = objs["storage"]
     assert isinstance(untyped_stores, bytes)
     objs["storage"] = objects.load_untyped_storages(BytesIO(untyped_stores))
     core, _ = objects.load(BytesIO(dumped_core), objs)
     assert isinstance(core, EngineCore)
-
     rebuild_core_executor(core)
-
-    manager_cls, manager_args, cache_blocks = core.scheduler.kv_cache_manager
-    manager = manager_cls(**manager_args)
-    assert isinstance(manager, KVCacheManager)
-
-    core.scheduler.kv_cache_manager = manager
-    for req in core.scheduler.requests:
-        block_pool = manager.block_pool
-        for blocks_in_group in manager.coordinator.get_blocks(req):
-            for block in blocks_in_group:
-                old_block = manager.block_pool.blocks[block.block_id]
-                block_pool.free_block_queue.remove(old_block)
-                manager.block_pool.blocks[block.block_id] = block
-
-    set_cache_blocks(core, cache_blocks)
+    rebuild_core_kv_cache_manager(core)
     return core
 
 def reduce_engine_core(core: EngineCore):
