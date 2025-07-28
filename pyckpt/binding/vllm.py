@@ -2,48 +2,27 @@ from collections import defaultdict
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Type
+from typing import Optional, Type
 
-from vllm.attention.layer import Attention
-from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
-from vllm.utils import sha256
-from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+import torch
 import vllm.v1.engine.detokenizer as detokenizer
 from tokenizers.decoders import DecodeStream
+from vllm.attention.layer import Attention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.executor.uniproc_executor import UniProcExecutor
+from vllm.utils import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from vllm.worker.worker_base import WorkerWrapperBase
 
 from pyckpt import objects
-from itertools import chain
 
-import torch
-
-
-@contextmanager
-def remove_kv_cache(core: EngineCore):
-    ctx = core.vllm_config.compilation_config.static_forward_context
-    attn_caches = [(attn, attn.kv_cache) for attn in ctx.values()]
-    for attn in ctx.values():
-        attn.kv_cache = [(cache.shape, cache.dtype, cache.device) for cache in attn.kv_cache]
-    model_executor = core.model_executor
-    assert isinstance(model_executor, UniProcExecutor), f"invliad executor: {model_executor}"
-    worker = model_executor.driver_worker.worker
-    assert isinstance(worker, Worker)
-    worker_cache = worker.model_runner.kv_caches
-    worker.model_runner.kv_caches = None
-    try:
-        yield
-    finally:
-        for attn, kv_cache in attn_caches:
-            attn.kv_cache = kv_cache
-        worker.model_runner.kv_caches = worker_cache
 
 @contextmanager
 def remove_forward_config(core: EngineCore):
@@ -60,14 +39,13 @@ def remove_forward_config(core: EngineCore):
 class CapturedKVCacheManager:
     manager_cls: Type[KVCacheManager]
     args: dict
-    cache_blocks: list[list]
     manager_states: tuple[list[dict[str, list[KVCacheBlock]]], dict[str, int]]
     cached_hash_to_block: dict[BlockHashWithGroupId, dict[int, KVCacheBlock]]
     req_to_block_hashes: defaultdict
 
 
 @contextmanager
-def remove_kv_cache_manager(core: EngineCore, cache_blocks: list[list]):
+def remove_kv_cache_manager(core: EngineCore):
     scheduler = core.scheduler
     assert isinstance(scheduler, Scheduler)
     manager = scheduler.kv_cache_manager
@@ -89,7 +67,6 @@ def remove_kv_cache_manager(core: EngineCore, cache_blocks: list[list]):
     scheduler.kv_cache_manager = CapturedKVCacheManager(
         manager_cls=type(manager),
         args = manager_args,
-        cache_blocks = cache_blocks,
         manager_states = manager_states,
         cached_hash_to_block = manager.block_pool.cached_block_hash_to_block,
         req_to_block_hashes = manager.req_to_block_hashes,
@@ -100,29 +77,59 @@ def remove_kv_cache_manager(core: EngineCore, cache_blocks: list[list]):
     finally:
         scheduler.kv_cache_manager = manager
 
-@contextmanager
-def remove_model_executor_worker(core: EngineCore):
-    executor = core.model_executor
-    assert isinstance(executor, UniProcExecutor), f"invliad executor type: {type(executor)}"
-    driver_worker = executor.driver_worker
-    executor.driver_worker = None
-    rpc_rank = driver_worker.rpc_rank
-    worker = driver_worker.worker
-    assert isinstance(worker, Worker)
-    core.model_executor = executor, (worker, rpc_rank)
-    try:
-        yield
-    finally:
-        core.model_executor = executor
-        executor.driver_worker = driver_worker
+@dataclass
+class CapturedGPUModelRunner:
+    requests: dict[str, CachedRequestState]
+    cache_blocks: "CacheBlocks"
+
+def collect_worker_cache_blocks(
+    worker: WorkerWrapperBase,
+    layer_groups: list[list[str]],
+    block_ids: list[list[int]],
+):
+    gpu_worker = worker.worker
+    if not isinstance(gpu_worker, GPUWorker):
+        raise ValueError(f"unsupported worker type: {type(gpu_worker)}")
+    cache_blocks = \
+      get_cache_blocks_v1(worker.vllm_config, layer_groups, block_ids)
+    return CapturedGPUModelRunner(
+        requests = gpu_worker.model_runner.requests,
+        cache_blocks = cache_blocks,
+    )
 
 @contextmanager
 def remove_model_executor(core: EngineCore):
+    layer_groups = get_layer_groups(core)
+    block_ids = get_req_cache_block_ids(core)
+
+    def capture_uni_proc_executor(executor: UniProcExecutor):
+        model_runner = executor.driver_worker.worker.model_runner
+        assert isinstance(model_runner, GPUModelRunner)
+        cache_blocks = get_cache_blocks_v1(
+            core.vllm_config,
+            layer_groups, 
+            block_ids,
+        )
+        assert len(cache_blocks) == 1
+        return [CapturedGPUModelRunner(model_runner.requests, cache_blocks)]
+
+    def capture_multi_proc_executor(
+        executor: MultiprocExecutor,
+    ) -> list[CapturedGPUModelRunner]:
+        return executor.collective_rpc(
+            collect_worker_cache_blocks, args=(layer_groups, block_ids)
+        )
+
     executor = core.model_executor
-    assert isinstance(executor, UniProcExecutor)
-    model_runner = executor.driver_worker.worker.model_runner
-    assert isinstance(model_runner, GPUModelRunner)
-    core.model_executor = type(executor), model_runner.requests
+    if isinstance(executor, UniProcExecutor):
+        runners = capture_uni_proc_executor(executor)
+    elif isinstance(executor, MultiprocExecutor):
+        runners = capture_multi_proc_executor(executor)
+    else:
+        raise ValueError(f"unsupported executor: {executor}")
+
+    executor = core.model_executor
+    core.model_executor = type(executor), runners
     try:
         yield
     finally:
@@ -130,31 +137,11 @@ def remove_model_executor(core: EngineCore):
 
 @contextmanager
 def prepare_engine(core: EngineCore):
-    cache_blocks = get_cache_blocks(core)
     with ExitStack() as stack:
-        stack.enter_context(remove_forward_config(core))
-        stack.enter_context(remove_kv_cache(core))
-        stack.enter_context(remove_kv_cache_manager(core, cache_blocks))
         stack.enter_context(remove_model_executor(core))
+        stack.enter_context(remove_kv_cache_manager(core))
+        stack.enter_context(remove_forward_config(core))
         yield
-
-def collect_attention_blocks(ctx: dict[str, any], manager_blocks: tuple[list[KVCacheBlock]]):
-    if not all(
-        len(attn.kv_cache) == 1 for attn in ctx.values()
-    ):
-        raise NotImplementedError("attention with multiple cache tensors")
-    cache_blocks = {}
-    for blocks in manager_blocks:
-        for block in blocks:
-            c = {}
-            for layer_name, attn in ctx.items():
-                cache_tensor = attn.kv_cache[0]
-                c[layer_name] = \
-                (cache_tensor[0][block.block_id].to("cpu"),\
-                 cache_tensor[1][block.block_id].to("cpu"))
-            cache_blocks[block.block_id] = c
-    return cache_blocks
-
 
 def get_cache_tensors(core: EngineCore) -> list[list[torch.Tensor]]:
     """
@@ -173,71 +160,126 @@ def get_cache_tensors(core: EngineCore) -> list[list[torch.Tensor]]:
         cache_tensors.append(list(attn.kv_cache[0] for attn in attns))
     return cache_tensors
 
+def get_cache_tensors_v1(
+    vllm_config: VllmConfig,
+    layer_groups: list[list[str]],
+):
+    cache_tensors: list[list[torch.Tensor]] = []
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for layer_names in layer_groups:
+        attns = [layers[name] for name in layer_names]
+        if any(len(attn.kv_cache) > 1 for attn in attns):
+            raise NotImplementedError("pipeline parallelism")
+        cache_tensors.append(list(attn.kv_cache[0] for attn in attns))
+    return cache_tensors
+
 CacheBlocks = list[list[tuple[list[int], torch.Tensor, torch.Tensor]]]
 
-def get_cache_blocks(core: EngineCore) -> CacheBlocks:
+def get_cache_blocks_v1(
+    vllm_config: VllmConfig,
+    layer_groups: list[list[str]],
+    block_ids: list[list[int]],
+    device: Optional[torch.device | str] = None,
+) -> CacheBlocks:
     """
     return: [group_id, layer_id] -> (block_indices, k_cache_blocks, v_cahce_blocks)
     """
-    cache_blocks = {}
-    scheduler = core.scheduler
-    assert isinstance(scheduler, Scheduler)
-    cache_tensors = get_cache_tensors(core)
+    if device is None:
+       device = torch.accelerator.current_accelerator()
+    cache_tensors = get_cache_tensors_v1(vllm_config, layer_groups)
+    assert len(block_ids) == len(cache_tensors)
     cache_blocks = [ [] for _ in cache_tensors ]
-    requests: dict[str, CachedRequestState] = \
-      core.model_executor.driver_worker.worker.model_runner.requests
-    for req in requests.values():
-        block_groups = req.block_ids
-        assert len(block_groups) == len(cache_tensors)
-        for cache, blocks, cache_tensor in \
-          zip(cache_blocks, block_groups, cache_tensors):
-            print(f"saved blocks: {blocks}")
-            block_indices = blocks.copy()
-            cache.extend(
-                (block_indices, layer[0][block_indices], layer[1][block_indices])
-                for layer in cache_tensor
+    for cache, blocks, cache_tensor in \
+      zip(cache_blocks, block_ids, cache_tensors):
+        print("get block ids: ", block_ids)
+        cache.extend(
+            (
+                blocks, 
+                layer[0][blocks].to(device),
+                layer[1][blocks].to(device),
             )
+        for layer in cache_tensor
+        )
     return cache_blocks
 
-
-def set_cache_blocks(core: EngineCore, cache_blocks: CacheBlocks):
-    scheduler = core.scheduler
-    assert isinstance(scheduler, Scheduler)
-    cache_tensors = get_cache_tensors(core)
-
-    if len(cache_blocks) > 1:
-        raise NotImplementedError("pipeline parallelism")
+def set_cache_blocks_v1(
+    vllm_config: VllmConfig,
+    layer_groups: list[list[str]],
+    cache_blocks: CacheBlocks,
+):
+    cache_tensors = get_cache_tensors_v1(vllm_config, layer_groups)
     for layer_tensors, layer_cache_blocks in zip(cache_tensors, cache_blocks):
         for layer_tensor, (block_indices, k_cache, v_cache) in \
           zip(layer_tensors, layer_cache_blocks):
-            layer_tensor[0][block_indices] = k_cache
-            layer_tensor[1][block_indices] = v_cache
+            # TODO(arusuki): optimize cache block copy here
+            layer_tensor[0][block_indices] = k_cache.to(layer_tensor.device)
+            layer_tensor[1][block_indices] = v_cache.to(layer_tensor.device)
 
-def rebuild_core_executor_worker(core: EngineCore):
-    executor, (worker, rpc_rank) = core.model_executor
-    assert isinstance(executor, UniProcExecutor)
-    assert isinstance(worker, Worker)
-    with set_current_vllm_config(core.vllm_config):
-        init_worker_distributed_environment(worker.vllm_config, worker.rank,
-                                            worker.distributed_init_method,
-                                            worker.local_rank)
-    executor.driver_worker = WorkerWrapperBase(core.vllm_config, rpc_rank)
-    executor.driver_worker.worker = worker
-    core.model_executor = executor
+def get_layer_groups(core: EngineCore) -> list[list[str]]:
+    assert isinstance(core.scheduler, Scheduler)
+    kv_cache_config = core.scheduler.kv_cache_config
+    return [
+        group_spec.layer_names \
+        for group_spec in kv_cache_config.kv_cache_groups
+    ]
 
-    for attn in get_layers_from_vllm_config(core.vllm_config, Attention).values():
-        attn.kv_cache = [
-            torch.zeros(shape, dtype=dtype, device=device) \
-              for (shape, dtype, device) in attn.kv_cache]
+def get_req_cache_block_ids(core: EngineCore) -> list[list[int]]:
+    scheduler = core.scheduler
+    assert isinstance(scheduler, Scheduler)
+    manager = scheduler.kv_cache_manager
+    num_groups = len(manager.kv_cache_config.kv_cache_groups)
+    cache_blocks = [[] for _ in range(num_groups)]
+    for req in scheduler.requests:
+        block_groups =  manager.get_block_ids(req)
+        for group_ids, block_ids in zip(cache_blocks, block_groups):
+            group_ids.extend(block_ids)
+    return cache_blocks
+
+def set_worker_kv_cache(
+    worker: WorkerWrapperBase,
+    runners: list[CapturedGPUModelRunner],
+    layer_groups: list[list[str]],
+):
+    gpu_worker = worker.worker
+    if not isinstance(gpu_worker, GPUWorker):
+        raise ValueError(f"unsupported worker type: {type(gpu_worker)}")
+    captured = runners[worker.rpc_rank]
+    gpu_worker.model_runner.requests = captured.requests
+    set_cache_blocks_v1(worker.vllm_config, layer_groups, captured.cache_blocks)
 
 def rebuild_core_executor(core: EngineCore):
-    executor_cls, requests = core.model_executor
-    core.model_executor = executor_cls(core.vllm_config)
+    def restore_uni_proc_executor(
+        executor: UniProcExecutor,
+        runners: list[CapturedGPUModelRunner],
+    ):
+        model_runner = executor.driver_worker.worker.model_runner
+        assert isinstance(model_runner, GPUModelRunner)
+        assert len(runners) == 1
+        model_runner.requests = runners[0].requests
+        layer_groups = get_layer_groups(core)
+        set_cache_blocks_v1(core.vllm_config, layer_groups, runners[0].cache_blocks)
 
-    model_runner = core.model_executor.driver_worker.worker.model_runner
-    assert isinstance(model_runner, GPUModelRunner)
-    model_runner.requests = requests
+    def restore_multi_proc_executor(
+        executor: MultiprocExecutor,
+        runners: list[CapturedGPUModelRunner],
+    ):
+        layer_groups = get_layer_groups(core)
+        return executor.collective_rpc(
+            set_worker_kv_cache,
+            args=(runners, layer_groups)
+        )
+
+    runners: list[CapturedGPUModelRunner]
+    executor_cls, runners = core.model_executor
+    executor = executor_cls(core.vllm_config)
+    core.model_executor = executor
     core._initialize_kv_caches(core.vllm_config)
+    if isinstance(executor, UniProcExecutor):
+        restore_uni_proc_executor(core.model_executor, runners)
+    elif isinstance(executor, MultiprocExecutor):
+        restore_multi_proc_executor(executor, runners)
+    else:
+        raise NotImplementedError(f"unsupported executor: {type(executor)}")
 
 def rebuild_core_kv_cache_manager(core: EngineCore):
     captured = core.scheduler.kv_cache_manager
@@ -266,16 +308,14 @@ def rebuild_core_kv_cache_manager(core: EngineCore):
     manager.req_to_block_hashes = captured.req_to_block_hashes
     core.scheduler.kv_cache_manager = manager
 
-    set_cache_blocks(core, captured.cache_blocks)
-
 def rebuild_engine(dumped_core: bytes, objs: dict):
     untyped_stores = objs["storage"]
     assert isinstance(untyped_stores, bytes)
     objs["storage"] = objects.load_untyped_storages(BytesIO(untyped_stores))
     core, _ = objects.load(BytesIO(dumped_core), objs)
     assert isinstance(core, EngineCore)
-    rebuild_core_executor(core)
     rebuild_core_kv_cache_manager(core)
+    rebuild_core_executor(core)
     return core
 
 def reduce_engine_core(core: EngineCore):
