@@ -36,7 +36,7 @@ from tests.utils import (
 )
 
 # MODEL_NAME =  "/home/yuuka/testp/Qwen2.5-7B-Instruct-GPTQ-Int8"
-MODEL_NAME =  "/docker/data/HF_MODELS/Qwen2.5-7B-Instruct-GPTQ-Int8"
+MODEL_NAME = "/docker/data/HF_MODELS/Qwen2.5-7B-Instruct-GPTQ-Int8"
 # MODEL_NAME =  "/home/yuuka/testp/opt-125m"
 PROMPT = "implement quick sort in C programming language: "
 
@@ -51,7 +51,9 @@ def make_request() -> EngineCoreRequest:
         mm_inputs=None,
         mm_hashes=None,
         mm_placeholders=None,
-        sampling_params=SamplingParams(output_kind=RequestOutputKind.DELTA, max_tokens=2048),
+        sampling_params=SamplingParams(
+            output_kind=RequestOutputKind.DELTA, max_tokens=2048
+        ),
         eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
@@ -59,11 +61,13 @@ def make_request() -> EngineCoreRequest:
         data_parallel_rank=None,
     )
 
+
 def join_safe(process: Process):
     process.join()
     assert process.exitcode == 0
 
-def _make_engine_core(tp_size = 1):
+
+def _make_engine_core(tp_size=1):
     os.environ["VLLM_USE_V1"] = "1"
     engine_args = EngineArgs(
         model=MODEL_NAME,
@@ -71,7 +75,7 @@ def _make_engine_core(tp_size = 1):
         enforce_eager=True,
         max_model_len=8192,
         # gpu_memory_utilization=0.3,
-        tensor_parallel_size = tp_size
+        tensor_parallel_size=tp_size,
     )
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.compilation_config.level == 0
@@ -83,6 +87,7 @@ def _make_engine_core(tp_size = 1):
     )
     return engine_core
 
+
 def _step_engine(core: EngineCore):
     core.add_request(make_request())
     assert len(core.scheduler.waiting) == 1
@@ -91,6 +96,7 @@ def _step_engine(core: EngineCore):
     _ = core.step()
     assert len(core.scheduler.waiting) == 0
     assert len(core.scheduler.running) == 1
+
 
 def _prepare_and_step_engine():
     core = _make_engine_core()
@@ -102,7 +108,7 @@ def _prepare_and_step_engine():
 def _test_reduce_engine(
     q: Queue,
     test_func: Optional[Callable[[EngineCore], Any]] = None,
-    tp_size = 1,
+    tp_size=1,
 ):
     try:
         patch_torch.init()
@@ -121,6 +127,7 @@ def _test_reduce_engine(
         q.put((engine_data, storages))
     finally:
         core.shutdown()
+
 
 def _test_rebuild_engine(
     engine_data: bytes,
@@ -149,9 +156,11 @@ def _test_rebuild_engine(
         if core:
             core.shutdown()
 
+
 def test_vllm_prepare_engine():
     ut = run_spawned(_prepare_and_step_engine)
     join_safe(ut)
+
 
 def test_vllm_reduce_engine():
     q = make_queue()
@@ -162,6 +171,7 @@ def test_vllm_reduce_engine():
 
     reloader = run_spawned(_test_rebuild_engine, engine_data, storages, _step_engine)
     join_safe(reloader)
+
 
 def _step_engine_and_process(
     num_step: int,
@@ -201,6 +211,7 @@ def _step_engine_and_process(
     print_req_blocks(core)
 
     return processor, save_random_states(), output
+
 
 def print_req_blocks(core: EngineCore):
     # scheduler = core.scheduler
@@ -245,9 +256,9 @@ def test_reduce_output_processor():
     file.seek(0)
     processor = Unpickler(file).load()
     assert isinstance(processor, OutputProcessor)
-    
+
+
 def test_vllm_engine_step_after_dump():
-    
     def get_text_from_data(engine_data: bytes):
         pickler = Unpickler(BytesIO(engine_data))
         ret = pickler.load()
@@ -282,6 +293,7 @@ def test_vllm_engine_step_after_dump():
 
     assert reference == interrupted
 
+
 def test_vllm_reduce_engine_tp():
     def get_text_from_data(engine_data: bytes):
         pickler = Unpickler(BytesIO(engine_data))
@@ -302,7 +314,7 @@ def test_vllm_reduce_engine_tp():
     reference = get_text_from_data(engine_data)
     print(reference)
 
-    reloader = run_spawned(_test_rebuild_engine, engine_data, storages, step(32), q)
+    reloader = run_spawned(_test_rebuild_engine, engine_data, storages, step(64), q)
     engine_data = q.get()
     join_safe(reloader)
 

@@ -2,9 +2,12 @@ from collections import defaultdict
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from io import BytesIO
+import random
 from typing import Optional, Type
 
+import dill
 import torch
+import numpy as np
 import vllm.v1.engine.detokenizer as detokenizer
 from tokenizers.decoders import DecodeStream
 from vllm.attention.layer import Attention
@@ -77,10 +80,29 @@ def remove_kv_cache_manager(core: EngineCore):
     finally:
         scheduler.kv_cache_manager = manager
 
+
+def save_random_states() -> bytes:
+    states = {
+        'python_random': random.getstate(),
+        'numpy': np.random.get_state(),
+        'torch': torch.get_rng_state(),
+        'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    }
+    return dill.dumps(states)
+
+def restore_random_states(states_data: bytes):
+    states = dill.loads(states_data)
+    random.setstate(states['python_random'])
+    np.random.set_state(states['numpy'])
+    torch.set_rng_state(states['torch'])
+    if torch.cuda.is_available() and states['torch_cuda'] is not None:
+        torch.cuda.set_rng_state_all(states['torch_cuda'])
+
 @dataclass
 class CapturedGPUModelRunner:
     requests: dict[str, CachedRequestState]
     cache_blocks: "CacheBlocks"
+    random_states: bytes
 
 def collect_worker_cache_blocks(
     worker: WorkerWrapperBase,
@@ -95,6 +117,7 @@ def collect_worker_cache_blocks(
     return CapturedGPUModelRunner(
         requests = gpu_worker.model_runner.requests,
         cache_blocks = cache_blocks,
+        random_states = save_random_states()
     )
 
 @contextmanager
@@ -195,8 +218,8 @@ def get_cache_blocks_v1(
         cache.extend(
             (
                 blocks, 
-                layer[0][blocks].to(device),
-                layer[1][blocks].to(device),
+                layer[0][blocks].to(device).share_memory_(),
+                layer[1][blocks].to(device).share_memory_(),
             )
         for layer in cache_tensor
         )
@@ -243,9 +266,11 @@ def set_worker_kv_cache(
     gpu_worker = worker.worker
     if not isinstance(gpu_worker, GPUWorker):
         raise ValueError(f"unsupported worker type: {type(gpu_worker)}")
+    print(f"set worker at rank {worker.rpc_rank}")
     captured = runners[worker.rpc_rank]
     gpu_worker.model_runner.requests = captured.requests
     set_cache_blocks_v1(worker.vllm_config, layer_groups, captured.cache_blocks)
+    restore_random_states(captured.random_states)
 
 def rebuild_core_executor(core: EngineCore):
     def restore_uni_proc_executor(
