@@ -6,6 +6,8 @@ from io import BytesIO, StringIO
 from multiprocessing import Process
 from typing import Any, Callable, Optional
 
+import cloudpickle
+import ray
 import torch
 from dill import Unpickler
 from tokenizers.decoders import DecodeStream
@@ -18,11 +20,16 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_distributed_executor import RayDistributedExecutor
+from vllm.worker.worker_base import WorkerWrapperBase
 
 from pyckpt import objects
 from pyckpt.binding import torch as patch_torch
 from pyckpt.binding import vllm as patch_vllm
 from pyckpt.binding.vllm import (
+    CapturedGPUModelRunner,
+    get_cache_blocks_v1,
+    get_req_cache_block_ids,
     prepare_engine,
     reduce_decode_stream,
     reduce_engine_core,
@@ -35,7 +42,7 @@ from tests.utils import (
     save_random_states,
 )
 
-# MODEL_NAME =  "/home/yuuka/testp/Qwen2.5-7B-Instruct-GPTQ-Int8"
+# MODEL_NAME =  os.path.expanduser("~/testp/Qwen2.5-7B-Instruct-GPTQ-Int8")
 MODEL_NAME = "/docker/data/HF_MODELS/Qwen2.5-7B-Instruct-GPTQ-Int8"
 # MODEL_NAME =  "/home/yuuka/testp/opt-125m"
 PROMPT = "implement quick sort in C programming language: "
@@ -67,7 +74,7 @@ def join_safe(process: Process):
     assert process.exitcode == 0
 
 
-def _make_engine_core(tp_size=1):
+def _make_engine_core(tp_size=1, pp_size=1):
     os.environ["VLLM_USE_V1"] = "1"
     engine_args = EngineArgs(
         model=MODEL_NAME,
@@ -76,6 +83,7 @@ def _make_engine_core(tp_size=1):
         max_model_len=8192,
         # gpu_memory_utilization=0.3,
         tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size
     )
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.compilation_config.level == 0
@@ -230,8 +238,6 @@ def print_req_blocks(core: EngineCore):
     #         "cache blocks(model_runner): ", cached_req.block_ids
     #     )
     pass
-
-
 def print_cache_blocks(cache_blocks: list[list[tuple[int, torch.Tensor]]]):
     assert len(cache_blocks) == 1
     blocks = cache_blocks[0]
@@ -320,4 +326,40 @@ def test_vllm_reduce_engine_tp():
 
     interrupted = get_text_from_data(engine_data)
     print(interrupted)
+
+def _test_pp():
+    core = _make_engine_core(2, 2)
+    print("executor type: ", type(core.model_executor))
+    assert isinstance(core.model_executor, RayDistributedExecutor)
+    kv_cache_config = core.scheduler.kv_cache_config
+    block_ids = get_req_cache_block_ids(core)
+
+    def capture_ray_distributed_executor(worker: WorkerWrapperBase):
+        cache_blocks = get_cache_blocks_v1(
+            worker.vllm_config,
+            block_ids,
+            kv_cache_config,
+        ) 
+        return [
+            CapturedGPUModelRunner(
+                worker.worker.model_runner.requests,
+                cache_blocks,
+                save_random_states(),
+            )
+        ]
+
+    ret = []
+    for worker in core.model_executor.workers:
+        ret.append(
+            worker.execute_method.remote(
+                cloudpickle.dumps(capture_ray_distributed_executor)
+            )
+        )
+    ret = ray.get(ret)
+    print(type(ret))
+
+
+def test_vllm_reduce_engine_pp():
+    dumper = run_spawned(_test_pp)
+    join_safe(dumper)
 

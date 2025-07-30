@@ -1,17 +1,18 @@
+import random
 from collections import defaultdict
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from io import BytesIO
-import random
 from typing import Optional, Type
 
 import dill
-import torch
 import numpy as np
+import torch
 import vllm.v1.engine.detokenizer as detokenizer
 from tokenizers.decoders import DecodeStream
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.executor.ray_distributed_executor import RayDistributedExecutor
 from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -19,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId, KVCacheBlock
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
@@ -106,14 +108,14 @@ class CapturedGPUModelRunner:
 
 def collect_worker_cache_blocks(
     worker: WorkerWrapperBase,
-    layer_groups: list[list[str]],
     block_ids: list[list[int]],
+    kv_cache_config: KVCacheConfig,
 ):
     gpu_worker = worker.worker
     if not isinstance(gpu_worker, GPUWorker):
         raise ValueError(f"unsupported worker type: {type(gpu_worker)}")
     cache_blocks = \
-      get_cache_blocks_v1(worker.vllm_config, layer_groups, block_ids)
+      get_cache_blocks_v1(worker.vllm_config, block_ids, kv_cache_config)
     return CapturedGPUModelRunner(
         requests = gpu_worker.model_runner.requests,
         cache_blocks = cache_blocks,
@@ -122,32 +124,44 @@ def collect_worker_cache_blocks(
 
 @contextmanager
 def remove_model_executor(core: EngineCore):
-    layer_groups = get_layer_groups(core)
     block_ids = get_req_cache_block_ids(core)
+    kv_cache_config = core.scheduler.kv_cache_config
 
     def capture_uni_proc_executor(executor: UniProcExecutor):
         model_runner = executor.driver_worker.worker.model_runner
         assert isinstance(model_runner, GPUModelRunner)
         cache_blocks = get_cache_blocks_v1(
             core.vllm_config,
-            layer_groups, 
             block_ids,
+            kv_cache_config,
         )
-        assert len(cache_blocks) == 1
-        return [CapturedGPUModelRunner(model_runner.requests, cache_blocks)]
+        return [
+            CapturedGPUModelRunner(
+                model_runner.requests,
+                cache_blocks,
+                save_random_states(),
+            )
+        ]
 
     def capture_multi_proc_executor(
         executor: MultiprocExecutor,
     ) -> list[CapturedGPUModelRunner]:
         return executor.collective_rpc(
-            collect_worker_cache_blocks, args=(layer_groups, block_ids)
+            collect_worker_cache_blocks, args=(block_ids,kv_cache_config)
         )
+
+    def capture_ray_distributed_executor(
+        executor: RayDistributedExecutor
+    ) -> list[CapturedGPUModelRunner]:
+        raise NotImplementedError("capture_ray_distributed_executor")
 
     executor = core.model_executor
     if isinstance(executor, UniProcExecutor):
         runners = capture_uni_proc_executor(executor)
     elif isinstance(executor, MultiprocExecutor):
         runners = capture_multi_proc_executor(executor)
+    elif isinstance(executor, RayDistributedExecutor):
+        runners = capture_ray_distributed_executor(executor)
     else:
         raise ValueError(f"unsupported executor: {executor}")
 
@@ -166,85 +180,50 @@ def prepare_engine(core: EngineCore):
         stack.enter_context(remove_forward_config(core))
         yield
 
-def get_cache_tensors(core: EngineCore) -> list[list[torch.Tensor]]:
-    """
-    return: [group_id, layer_id] -> cache_tensor
-    """
-    assert isinstance(core.scheduler, Scheduler)
-    kv_cache_config = core.scheduler.kv_cache_config
-    layers = get_layers_from_vllm_config(core.vllm_config, Attention)
-    assert len(core.vllm_config.compilation_config.static_forward_context) \
-       ==  len(layers)
-    cache_tensors = []
-    for group_spec in kv_cache_config.kv_cache_groups:
-        attns = [layers[name] for name in group_spec.layer_names]
-        if any(len(attn.kv_cache) > 1 for attn in attns):
-            raise NotImplementedError("pipeline parallelism")
-        cache_tensors.append(list(attn.kv_cache[0] for attn in attns))
-    return cache_tensors
-
-def get_cache_tensors_v1(
-    vllm_config: VllmConfig,
-    layer_groups: list[list[str]],
-):
-    cache_tensors: list[list[torch.Tensor]] = []
+def get_cache_tensors_v1(vllm_config: VllmConfig):
     layers = get_layers_from_vllm_config(vllm_config, Attention)
-    for layer_names in layer_groups:
-        attns = [layers[name] for name in layer_names]
-        if any(len(attn.kv_cache) > 1 for attn in attns):
-            raise NotImplementedError("pipeline parallelism")
-        cache_tensors.append(list(attn.kv_cache[0] for attn in attns))
-    return cache_tensors
+    assert all(len(attn.kv_cache) == 1 for attn in layers.values())
+    return {
+        layer_name: attn.kv_cache[0] for layer_name, attn in layers.items()
+    }
 
-CacheBlocks = list[list[tuple[list[int], torch.Tensor, torch.Tensor]]]
+CacheBlocks = dict[str, tuple[list[int], torch.Tensor, torch.Tensor]]
 
 def get_cache_blocks_v1(
     vllm_config: VllmConfig,
-    layer_groups: list[list[str]],
     block_ids: list[list[int]],
+    kv_cache_config: KVCacheConfig,
     device: Optional[torch.device | str] = None,
 ) -> CacheBlocks:
     """
-    return: [group_id, layer_id] -> (block_indices, k_cache_blocks, v_cahce_blocks)
+    return: {[layer_name]: (block_indices, k_cache_blocks, v_cahce_blocks)}
     """
     if device is None:
        device = torch.accelerator.current_accelerator()
-    cache_tensors = get_cache_tensors_v1(vllm_config, layer_groups)
-    assert len(block_ids) == len(cache_tensors)
-    cache_blocks = [ [] for _ in cache_tensors ]
-    for cache, blocks, cache_tensor in \
-      zip(cache_blocks, block_ids, cache_tensors):
-        print("get block ids: ", block_ids)
-        cache.extend(
-            (
+    cache_tensors = get_cache_tensors_v1(vllm_config)
+    group_specs = kv_cache_config.kv_cache_groups
+    assert len(block_ids) == len(group_specs)
+    cache_blocks = {}
+    for group_spec, blocks in zip(group_specs, block_ids):
+        for layer_name in group_spec.layer_names:
+            if layer_name not in cache_tensors:
+                continue
+            cache_tensor = cache_tensors[layer_name]
+            cache_blocks[layer_name] = (
                 blocks, 
-                layer[0][blocks].to(device).share_memory_(),
-                layer[1][blocks].to(device).share_memory_(),
+                cache_tensor[0][blocks].to(device).share_memory_(),
+                cache_tensor[1][blocks].to(device).share_memory_(),
             )
-        for layer in cache_tensor
-        )
     return cache_blocks
 
-def set_cache_blocks_v1(
-    vllm_config: VllmConfig,
-    layer_groups: list[list[str]],
-    cache_blocks: CacheBlocks,
-):
-    cache_tensors = get_cache_tensors_v1(vllm_config, layer_groups)
-    for layer_tensors, layer_cache_blocks in zip(cache_tensors, cache_blocks):
-        for layer_tensor, (block_indices, k_cache, v_cache) in \
-          zip(layer_tensors, layer_cache_blocks):
-            # TODO(arusuki): optimize cache block copy here
-            layer_tensor[0][block_indices] = k_cache.to(layer_tensor.device)
-            layer_tensor[1][block_indices] = v_cache.to(layer_tensor.device)
+def set_cache_blocks_v1(vllm_config: VllmConfig, cache_blocks: CacheBlocks):
+    cache_tensors = get_cache_tensors_v1(vllm_config)
+    for layer_name, cache_tensor in cache_tensors.items():
+        # TODO(arusuki): optimize cache block copy here
+        blocks, k_cache, v_cache = cache_blocks[layer_name]
+        cache_tensor[0][blocks] = k_cache.to(cache_tensor.device)
+        cache_tensor[1][blocks] = v_cache.to(cache_tensor.device)
 
-def get_layer_groups(core: EngineCore) -> list[list[str]]:
-    assert isinstance(core.scheduler, Scheduler)
-    kv_cache_config = core.scheduler.kv_cache_config
-    return [
-        group_spec.layer_names \
-        for group_spec in kv_cache_config.kv_cache_groups
-    ]
 
 def get_req_cache_block_ids(core: EngineCore) -> list[list[int]]:
     scheduler = core.scheduler
@@ -261,7 +240,6 @@ def get_req_cache_block_ids(core: EngineCore) -> list[list[int]]:
 def set_worker_kv_cache(
     worker: WorkerWrapperBase,
     runners: list[CapturedGPUModelRunner],
-    layer_groups: list[list[str]],
 ):
     gpu_worker = worker.worker
     if not isinstance(gpu_worker, GPUWorker):
@@ -269,7 +247,7 @@ def set_worker_kv_cache(
     print(f"set worker at rank {worker.rpc_rank}")
     captured = runners[worker.rpc_rank]
     gpu_worker.model_runner.requests = captured.requests
-    set_cache_blocks_v1(worker.vllm_config, layer_groups, captured.cache_blocks)
+    set_cache_blocks_v1(worker.vllm_config, captured.cache_blocks)
     restore_random_states(captured.random_states)
 
 def rebuild_core_executor(core: EngineCore):
@@ -281,17 +259,15 @@ def rebuild_core_executor(core: EngineCore):
         assert isinstance(model_runner, GPUModelRunner)
         assert len(runners) == 1
         model_runner.requests = runners[0].requests
-        layer_groups = get_layer_groups(core)
-        set_cache_blocks_v1(core.vllm_config, layer_groups, runners[0].cache_blocks)
+        set_cache_blocks_v1(core.vllm_config, runners[0].cache_blocks)
 
     def restore_multi_proc_executor(
         executor: MultiprocExecutor,
         runners: list[CapturedGPUModelRunner],
     ):
-        layer_groups = get_layer_groups(core)
         return executor.collective_rpc(
             set_worker_kv_cache,
-            args=(runners, layer_groups)
+            args=(runners,)
         )
 
     runners: list[CapturedGPUModelRunner]
