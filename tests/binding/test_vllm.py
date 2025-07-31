@@ -356,7 +356,7 @@ def _test_pp():
             )
         )
     ret = ray.get(ret)
-    print(type(ret))
+    assert len(ret) == 4
 
 
 def test_vllm_reduce_engine_pp():

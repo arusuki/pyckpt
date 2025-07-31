@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Optional, Type
 
+import cloudpickle
 import dill
 import numpy as np
+import ray
 import torch
 import vllm.v1.engine.detokenizer as detokenizer
 from tokenizers.decoders import DecodeStream
@@ -153,7 +155,16 @@ def remove_model_executor(core: EngineCore):
     def capture_ray_distributed_executor(
         executor: RayDistributedExecutor
     ) -> list[CapturedGPUModelRunner]:
-        raise NotImplementedError("capture_ray_distributed_executor")
+        captured = []
+        for worker in executor.workers:
+            captured.append(
+                worker.execute_method.remote(
+                    cloudpickle.dumps(collect_worker_cache_blocks),
+                    (block_ids, kv_cache_config),
+                )
+            )
+        captured = ray.get(captured)
+        return captured
 
     executor = core.model_executor
     if isinstance(executor, UniProcExecutor):
@@ -270,6 +281,16 @@ def rebuild_core_executor(core: EngineCore):
             args=(runners,)
         )
 
+    def restore_ray_distributed_executor(
+        executor: RayDistributedExecutor,
+        runners: list[CapturedGPUModelRunner],
+    ):
+        for worker in executor.workers:
+            worker.execute_method.remote(
+                cloudpickle.dumps(set_worker_kv_cache),
+                (runners,),
+            )
+
     runners: list[CapturedGPUModelRunner]
     executor_cls, runners = core.model_executor
     executor = executor_cls(core.vllm_config)
@@ -279,6 +300,8 @@ def rebuild_core_executor(core: EngineCore):
         restore_uni_proc_executor(core.model_executor, runners)
     elif isinstance(executor, MultiprocExecutor):
         restore_multi_proc_executor(executor, runners)
+    elif isinstance(executor, RayDistributedExecutor):
+        restore_ray_distributed_executor(executor, runners)
     else:
         raise NotImplementedError(f"unsupported executor: {type(executor)}")
 
