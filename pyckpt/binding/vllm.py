@@ -291,7 +291,7 @@ def rebuild_core_executor(core: EngineCore):
         for worker in executor.workers:
             worker.execute_method.remote(
                 cloudpickle.dumps(set_worker_kv_cache),
-                (runners,),
+                runners,
             )
 
     runners: list[CapturedGPUModelRunner]
