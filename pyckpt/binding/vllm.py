@@ -32,14 +32,17 @@ from pyckpt import objects
 
 
 @contextmanager
-def remove_forward_config(core: EngineCore):
-    config = core.vllm_config.compilation_config
-    ctx = config.static_forward_context
-    config.static_forward_context = {}
+def remove_config(core: EngineCore):
+    config = core.vllm_config
+    ctx = config.compilation_config.static_forward_context
+    config.compilation_config.static_forward_context = {}
+    placement_group = config.parallel_config.placement_group
+    config.parallel_config.placement_group = None
     try:
         yield
     finally:
-        config.static_forward_context = ctx
+        config.compilation_config.static_forward_context = ctx
+        config.parallel_config.placement_group = placement_group
         
 
 @dataclass
@@ -188,7 +191,7 @@ def prepare_engine(core: EngineCore):
     with ExitStack() as stack:
         stack.enter_context(remove_model_executor(core))
         stack.enter_context(remove_kv_cache_manager(core))
-        stack.enter_context(remove_forward_config(core))
+        stack.enter_context(remove_config(core))
         yield
 
 def get_cache_tensors_v1(vllm_config: VllmConfig):
@@ -338,6 +341,7 @@ def rebuild_engine(dumped_core: bytes, objs: dict):
     objs["storage"] = objects.load_untyped_storages(BytesIO(untyped_stores))
     core, _ = objects.load(BytesIO(dumped_core), objs)
     assert isinstance(core, EngineCore)
+    assert core.vllm_config.parallel_config.placement_group is None
     rebuild_core_kv_cache_manager(core)
     rebuild_core_executor(core)
     return core
