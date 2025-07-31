@@ -160,7 +160,7 @@ def remove_model_executor(core: EngineCore):
             captured.append(
                 worker.execute_method.remote(
                     cloudpickle.dumps(collect_worker_cache_blocks),
-                    (block_ids, kv_cache_config),
+                    block_ids, kv_cache_config
                 )
             )
         captured = ray.get(captured)
