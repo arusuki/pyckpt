@@ -6,6 +6,8 @@ from io import BytesIO, StringIO
 from multiprocessing import Process
 from typing import Any, Callable, Optional
 
+import cloudpickle
+import ray
 import torch
 from dill import Unpickler
 from tokenizers.decoders import DecodeStream
@@ -18,11 +20,16 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.ray_distributed_executor import RayDistributedExecutor
+from vllm.worker.worker_base import WorkerWrapperBase
 
 from pyckpt import objects
 from pyckpt.binding import torch as patch_torch
 from pyckpt.binding import vllm as patch_vllm
 from pyckpt.binding.vllm import (
+    CapturedGPUModelRunner,
+    get_cache_blocks_v1,
+    get_req_cache_block_ids,
     prepare_engine,
     reduce_decode_stream,
     reduce_engine_core,
@@ -35,7 +42,7 @@ from tests.utils import (
     save_random_states,
 )
 
-# MODEL_NAME =  "/home/yuuka/testp/Qwen2.5-7B-Instruct-GPTQ-Int8"
+# MODEL_NAME =  os.path.expanduser("~/testp/Qwen2.5-7B-Instruct-GPTQ-Int8")
 MODEL_NAME = "/docker/data/HF_MODELS/Qwen2.5-7B-Instruct-GPTQ-Int8"
 # MODEL_NAME =  "/home/yuuka/testp/opt-125m"
 PROMPT = "implement quick sort in C programming language: "
@@ -67,15 +74,16 @@ def join_safe(process: Process):
     assert process.exitcode == 0
 
 
-def _make_engine_core(tp_size=1):
+def _make_engine_core(tp_size=1, pp_size=1):
     os.environ["VLLM_USE_V1"] = "1"
     engine_args = EngineArgs(
         model=MODEL_NAME,
         compilation_config=0,
         enforce_eager=True,
         max_model_len=8192,
-        # gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.8,
         tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
     )
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.compilation_config.level == 0
@@ -109,10 +117,12 @@ def _test_reduce_engine(
     q: Queue,
     test_func: Optional[Callable[[EngineCore], Any]] = None,
     tp_size=1,
+    pp_size=1,
 ):
+    core: Optional[EngineCore] = None
     try:
         patch_torch.init()
-        core = _make_engine_core(tp_size)
+        core = _make_engine_core(tp_size, pp_size)
         ret = None
         if test_func:
             ret = test_func(core)
@@ -126,7 +136,8 @@ def _test_reduce_engine(
         engine_data = file.getvalue()
         q.put((engine_data, storages))
     finally:
-        core.shutdown()
+        if core:
+            core.shutdown()
 
 
 def _test_rebuild_engine(
@@ -200,7 +211,11 @@ def _step_engine_and_process(
         restore_random_states(rng_states)
 
     for _ in range(num_step):
-        outs = core.step()[0].get(0)
+        if core.batch_queue_size > 1:
+            assert core.step_with_batch_queue() == (None, True)
+            outs = core.step_with_batch_queue()[0].get(0)
+        else:
+            outs = core.step()[0].get(0)
         assert outs.outputs is not None
         # print(outs.outputs)
         processed_outputs = processor.process_outputs(outs.outputs)
@@ -307,12 +322,50 @@ def test_vllm_reduce_engine_tp():
         return partial(_step_engine_and_process, num_step)
 
     q = make_queue()
-    dumper = run_spawned(_test_reduce_engine, q, step(64), 2)
+    dumper = run_spawned(_test_reduce_engine, q, step(128), 2)
     engine_data, storages = q.get()
     join_safe(dumper)
 
     reference = get_text_from_data(engine_data)
     print(reference)
+
+    dumper = run_spawned(_test_reduce_engine, q, step(64), 2)
+    engine_data, storages = q.get()
+    join_safe(dumper)
+
+    reloader = run_spawned(_test_rebuild_engine, engine_data, storages, step(64), q)
+    engine_data = q.get()
+    join_safe(reloader)
+
+    interrupted = get_text_from_data(engine_data)
+    print(interrupted)
+    assert reference == interrupted
+
+
+def test_vllm_reduce_engine_pp():
+    def get_text_from_data(engine_data: bytes):
+        pickler = Unpickler(BytesIO(engine_data))
+        ret = pickler.load()
+        assert isinstance(ret, tuple) and len(ret) == 3
+        output = ret[2]
+        assert isinstance(output, StringIO)
+        return output.getvalue()
+
+    def step(num_step: int):
+        return partial(_step_engine_and_process, num_step)
+
+    q = make_queue()
+    dumper = run_spawned(_test_reduce_engine, q, step(128), 1, 2)
+    engine_data, storages = q.get()
+    join_safe(dumper)
+
+    reference = get_text_from_data(engine_data)
+    print(reference)
+
+    q = make_queue()
+    dumper = run_spawned(_test_reduce_engine, q, step(64), 1, 2)
+    engine_data, storages = q.get()
+    join_safe(dumper)
 
     reloader = run_spawned(_test_rebuild_engine, engine_data, storages, step(64), q)
     engine_data = q.get()
@@ -321,3 +374,4 @@ def test_vllm_reduce_engine_tp():
     interrupted = get_text_from_data(engine_data)
     print(interrupted)
 
+    assert reference == interrupted
