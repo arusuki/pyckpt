@@ -107,6 +107,7 @@ def restore_random_states(states_data: bytes):
 
 @dataclass
 class CapturedGPUModelRunner:
+    rank: int
     requests: dict[str, CachedRequestState]
     cache_blocks: "CacheBlocks"
     random_states: bytes
@@ -114,14 +115,16 @@ class CapturedGPUModelRunner:
 def collect_worker_cache_blocks(
     worker: WorkerWrapperBase,
     block_ids: list[list[int]],
-    kv_cache_config: KVCacheConfig,
 ):
     gpu_worker = worker.worker
     if not isinstance(gpu_worker, GPUWorker):
         raise ValueError(f"unsupported worker type: {type(gpu_worker)}")
     cache_blocks = \
-      get_cache_blocks_v1(worker.vllm_config, block_ids, kv_cache_config)
+      get_cache_blocks_v1(
+        worker.vllm_config, block_ids, gpu_worker.model_runner.kv_cache_config
+      )
     return CapturedGPUModelRunner(
+        rank = worker.rank,
         requests = gpu_worker.model_runner.requests,
         cache_blocks = cache_blocks,
         random_states = save_random_states()
@@ -130,11 +133,12 @@ def collect_worker_cache_blocks(
 @contextmanager
 def remove_model_executor(core: EngineCore):
     block_ids = get_req_cache_block_ids(core)
-    kv_cache_config = core.scheduler.kv_cache_config
+    assert isinstance(core.scheduler, Scheduler)
 
     def capture_uni_proc_executor(executor: UniProcExecutor):
         model_runner = executor.driver_worker.worker.model_runner
         assert isinstance(model_runner, GPUModelRunner)
+        kv_cache_config = core.scheduler.kv_cache_manager.kv_cache_config
         cache_blocks = get_cache_blocks_v1(
             core.vllm_config,
             block_ids,
@@ -142,9 +146,10 @@ def remove_model_executor(core: EngineCore):
         )
         return [
             CapturedGPUModelRunner(
-                model_runner.requests,
-                cache_blocks,
-                save_random_states(),
+                rank = 0,
+                requests = model_runner.requests,
+                cache_blocks = cache_blocks,
+                random_states = save_random_states(),
             )
         ]
 
@@ -152,7 +157,7 @@ def remove_model_executor(core: EngineCore):
         executor: MultiprocExecutor,
     ) -> list[CapturedGPUModelRunner]:
         return executor.collective_rpc(
-            collect_worker_cache_blocks, args=(block_ids,kv_cache_config)
+            collect_worker_cache_blocks, args=(block_ids,)
         )
 
     def capture_ray_distributed_executor(
@@ -163,7 +168,7 @@ def remove_model_executor(core: EngineCore):
             captured.append(
                 worker.execute_method.remote(
                     cloudpickle.dumps(collect_worker_cache_blocks),
-                    block_ids, kv_cache_config
+                    block_ids,
                 )
             )
         captured = ray.get(captured)
@@ -180,6 +185,8 @@ def remove_model_executor(core: EngineCore):
         raise ValueError(f"unsupported executor: {executor}")
 
     executor = core.model_executor
+    runners = sorted(runners, key=lambda r: r.rank)
+    print("captured ranks: ", list(r.rank for r in runners))
     core.model_executor = type(executor), runners
     try:
         yield
@@ -232,9 +239,9 @@ def get_cache_blocks_v1(
 
 def set_cache_blocks_v1(vllm_config: VllmConfig, cache_blocks: CacheBlocks):
     cache_tensors = get_cache_tensors_v1(vllm_config)
-    for layer_name, cache_tensor in cache_tensors.items():
+    for layer_name, (blocks, k_cache, v_cache) in cache_blocks.items():
         # TODO(arusuki): optimize cache block copy here
-        blocks, k_cache, v_cache = cache_blocks[layer_name]
+        cache_tensor = cache_tensors[layer_name]
         cache_tensor[0][blocks] = k_cache.to(cache_tensor.device)
         cache_tensor[1][blocks] = v_cache.to(cache_tensor.device)
 
@@ -258,8 +265,7 @@ def set_worker_kv_cache(
     gpu_worker = worker.worker
     if not isinstance(gpu_worker, GPUWorker):
         raise ValueError(f"unsupported worker type: {type(gpu_worker)}")
-    print(f"set worker at rank {worker.rpc_rank}")
-    captured = runners[worker.rpc_rank]
+    captured = runners[worker.rank]
     gpu_worker.model_runner.requests = captured.requests
     set_cache_blocks_v1(worker.vllm_config, captured.cache_blocks)
     restore_random_states(captured.random_states)
