@@ -81,9 +81,9 @@ def _make_engine_core(tp_size=1, pp_size=1):
         compilation_config=0,
         enforce_eager=True,
         max_model_len=8192,
-        # gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.8,
         tensor_parallel_size=tp_size,
-        pipeline_parallel_size=pp_size
+        pipeline_parallel_size=pp_size,
     )
     vllm_config = engine_args.create_engine_config()
     assert vllm_config.compilation_config.level == 0
@@ -117,10 +117,12 @@ def _test_reduce_engine(
     q: Queue,
     test_func: Optional[Callable[[EngineCore], Any]] = None,
     tp_size=1,
+    pp_size=1,
 ):
+    core: Optional[EngineCore] = None
     try:
         patch_torch.init()
-        core = _make_engine_core(tp_size)
+        core = _make_engine_core(tp_size, pp_size)
         ret = None
         if test_func:
             ret = test_func(core)
@@ -134,7 +136,8 @@ def _test_reduce_engine(
         engine_data = file.getvalue()
         q.put((engine_data, storages))
     finally:
-        core.shutdown()
+        if core:
+            core.shutdown()
 
 
 def _test_rebuild_engine(
@@ -208,7 +211,11 @@ def _step_engine_and_process(
         restore_random_states(rng_states)
 
     for _ in range(num_step):
-        outs = core.step()[0].get(0)
+        if core.batch_queue_size > 1:
+            assert core.step_with_batch_queue() == (None, True)
+            outs = core.step_with_batch_queue()[0].get(0)
+        else:
+            outs = core.step()[0].get(0)
         assert outs.outputs is not None
         # print(outs.outputs)
         processed_outputs = processor.process_outputs(outs.outputs)
@@ -238,6 +245,8 @@ def print_req_blocks(core: EngineCore):
     #         "cache blocks(model_runner): ", cached_req.block_ids
     #     )
     pass
+
+
 def print_cache_blocks(cache_blocks: list[list[tuple[int, torch.Tensor]]]):
     assert len(cache_blocks) == 1
     blocks = cache_blocks[0]
@@ -313,12 +322,50 @@ def test_vllm_reduce_engine_tp():
         return partial(_step_engine_and_process, num_step)
 
     q = make_queue()
-    dumper = run_spawned(_test_reduce_engine, q, step(64), 2)
+    dumper = run_spawned(_test_reduce_engine, q, step(128), 2)
     engine_data, storages = q.get()
     join_safe(dumper)
 
     reference = get_text_from_data(engine_data)
     print(reference)
+
+    dumper = run_spawned(_test_reduce_engine, q, step(64), 2)
+    engine_data, storages = q.get()
+    join_safe(dumper)
+
+    reloader = run_spawned(_test_rebuild_engine, engine_data, storages, step(64), q)
+    engine_data = q.get()
+    join_safe(reloader)
+
+    interrupted = get_text_from_data(engine_data)
+    print(interrupted)
+    assert reference == interrupted
+
+
+def test_vllm_reduce_engine_pp():
+    def get_text_from_data(engine_data: bytes):
+        pickler = Unpickler(BytesIO(engine_data))
+        ret = pickler.load()
+        assert isinstance(ret, tuple) and len(ret) == 3
+        output = ret[2]
+        assert isinstance(output, StringIO)
+        return output.getvalue()
+
+    def step(num_step: int):
+        return partial(_step_engine_and_process, num_step)
+
+    q = make_queue()
+    dumper = run_spawned(_test_reduce_engine, q, step(128), 1, 2)
+    engine_data, storages = q.get()
+    join_safe(dumper)
+
+    reference = get_text_from_data(engine_data)
+    print(reference)
+
+    q = make_queue()
+    dumper = run_spawned(_test_reduce_engine, q, step(64), 1, 2)
+    engine_data, storages = q.get()
+    join_safe(dumper)
 
     reloader = run_spawned(_test_rebuild_engine, engine_data, storages, step(64), q)
     engine_data = q.get()
@@ -327,39 +374,4 @@ def test_vllm_reduce_engine_tp():
     interrupted = get_text_from_data(engine_data)
     print(interrupted)
 
-def _test_pp():
-    core = _make_engine_core(2, 2)
-    print("executor type: ", type(core.model_executor))
-    assert isinstance(core.model_executor, RayDistributedExecutor)
-    kv_cache_config = core.scheduler.kv_cache_config
-    block_ids = get_req_cache_block_ids(core)
-
-    def capture_ray_distributed_executor(worker: WorkerWrapperBase):
-        cache_blocks = get_cache_blocks_v1(
-            worker.vllm_config,
-            block_ids,
-            kv_cache_config,
-        ) 
-        return [
-            CapturedGPUModelRunner(
-                worker.worker.model_runner.requests,
-                cache_blocks,
-                save_random_states(),
-            )
-        ]
-
-    ret = []
-    for worker in core.model_executor.workers:
-        ret.append(
-            worker.execute_method.remote(
-                cloudpickle.dumps(capture_ray_distributed_executor)
-            )
-        )
-    ret = ray.get(ret)
-    assert len(ret) == 4
-
-
-def test_vllm_reduce_engine_pp():
-    dumper = run_spawned(_test_pp)
-    join_safe(dumper)
-
+    assert reference == interrupted
