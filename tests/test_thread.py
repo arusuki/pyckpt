@@ -9,7 +9,10 @@ from typing import Callable, Dict, Generic, Optional, TypeVar
 
 import forbiddenfruit as patch
 
+import pyckpt.interpreter as interpreter
+import pyckpt.objects as objects
 from pyckpt import configure_logging
+from pyckpt.objects import PersistedObjects
 from pyckpt.thread import (
     LiveThread,
     LockType,
@@ -22,12 +25,10 @@ from pyckpt.thread import (
     snapshot_from_thread,
 )
 
-import pyckpt.objects as objects
-from pyckpt.objects import PersistedObjects
-
 T = TypeVar("T")
 
 configure_logging(logging.DEBUG)
+
 
 class SingletonValue(Generic[T]):
     _instance: Optional["SingletonValue"] = None
@@ -122,6 +123,7 @@ def test_thread_capture_with_exception(capsys):
 class ReturnValue:
     cocoon: Optional[ThreadCocoon]
     multi_capture: bool
+
 
 def test_thread_multiple_captures(capsys):
     @dataclass
@@ -362,7 +364,7 @@ def test_multiple_frame_capture(capsys):
             if thread_cocoon:
                 thread_cocoon, err = thread_cocoon
                 assert err is None
-            c,objs = objects.copy(thread_cocoon)
+            c, objs = objects.copy(thread_cocoon)
         print(s1)
 
     def bar():
@@ -409,7 +411,7 @@ def test_thread_capture_with_dump(capsys):
         if thread_cocoon is not None:
             thread_cocoon, err = thread_cocoon
             assert err is None
-            c, objs= objects.copy(thread_cocoon)
+            c, objs = objects.copy(thread_cocoon)
         print(s)
 
     t = threading.Thread(target=test)
@@ -427,6 +429,7 @@ def test_thread_capture_with_dump(capsys):
     result = capsys.readouterr()
     assert result.out.count(s) == 1
 
+
 def test_thread_mark_truncate():
     def foo():
         s, err = snapshot_from_thread(threading.current_thread())
@@ -442,10 +445,61 @@ def test_thread_mark_truncate():
 
         def inner():
             return mark_truncate(foo)
-        
+
         return outter()
-    
+
     s = mark_stop(test_truncate)
     assert isinstance(s, ThreadCocoon)
     assert len(s.non_leaf_frames) == 2
 
+
+_test_lock = threading.Lock()
+
+EVENT_TO_NAME = {
+    0: "CALL",
+    1: "EXCEPTION",
+    2: "LINE",
+    3: "RETURN",
+    4: "C_CALL",
+    5: "C_EXCEPTION",
+    6: "C_RETURN",
+    7: "OPCODE",
+}
+
+
+def test_thread_function_call():
+    def py_foo():
+        pass
+
+    def test_func():
+        while not _test_lock.acquire(blocking=False):
+            sleep(0.1)
+            py_foo()
+
+        if _test_lock.locked():
+            _test_lock.release()
+
+    counter = 0
+
+    def foo():
+        _test_lock.acquire()
+        def watcher(frame: FrameType, event: int, arg: int):
+            try:
+                nonlocal counter
+                global _test_lock
+                counter += 1
+                if counter >= 10:
+                    _test_lock.release()
+                    interpreter.set_profile(None)
+                    print("ret")
+                    return
+                print("hit: ", EVENT_TO_NAME[event], arg, frame, f"last_i: {frame.f_lasti}")
+            except Exception as e:
+                print(f"exception: {e}")
+                interpreter.set_profile(None)
+
+        interpreter.set_profile(watcher)
+        test_func()
+
+    foo()
+    assert counter == 10

@@ -6,6 +6,7 @@ from .frame import (
     get_generator,
     restore_thread_state,
     save_thread_state,
+    set_profile,
     set_profile_all_threads,
     snapshot,
 )

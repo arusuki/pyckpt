@@ -44,6 +44,7 @@ cdef extern from "Python.h":
 
     ctypedef int (*Py_tracefunc)(PyObject *, PyFrameObject *, int, PyObject *)
     cdef int PyThread_acquire_lock(PyThread_type_lock lock, int wait_flag)
+    cdef int PyEval_SetProfile(Py_tracefunc func, PyObject *arg)
     cdef void PyThread_release_lock(PyThread_type_lock lock)
     cdef int _PyEval_SetProfile(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
     cdef int _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
@@ -371,8 +372,20 @@ cdef int trace_trampoline(PyObject *callback, PyFrameObject *frame, int what, Py
     )
     return 0
 
+def set_profile(func: Optional[FunctionType]):
+    if not func:
+        PyEval_SetProfile(NULL, NULL)
+        return
+    cdef _PyRuntimeState* runtime = <_PyRuntimeState*> get_python_py_runtime()
+    cdef PyThreadState* tstate
+    if runtime == NULL:
+        raise RuntimeError("filed to fetch python runtime")
+    PyEval_SetProfile(trace_trampoline, <PyObject*> func)
 
 def set_profile_all_threads(func: Optional[FunctionType]):
+    if not func:
+        PyEval_SetProfile(NULL, NULL)
+        return
     cdef _PyRuntimeState* runtime = <_PyRuntimeState*> get_python_py_runtime()
     cdef PyThreadState* tstate
     if runtime == NULL:

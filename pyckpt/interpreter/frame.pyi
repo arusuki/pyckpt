@@ -28,6 +28,7 @@ def restore_thread_state(state: dict) -> Any:
     """restore_thread_state(state: Dict)"""
 def save_thread_state(thread: Thread) -> Any:
     """save_thread_state(thread: Thread)"""
+def set_profile(func: FunctionType | None) -> Any: ...
 def set_profile_all_threads(func: FunctionType | None) -> Any:
     """set_profile_all_threads(func: Optional[FunctionType])"""
 def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> dict:
