@@ -398,3 +398,80 @@ def set_profile_all_threads(func: Optional[FunctionType]):
     while tstate != NULL:
         _PyEval_SetProfile(tstate, trace_trampoline, <PyObject*> func)
         tstate = PyThreadState_Next(tstate)
+
+cdef object _do_snapshot_frame(void* frame_ptr, int stack_size_hint):
+    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> frame_ptr
+    cdef PyFunctionObject* func = <PyFunctionObject*>(frame.f_func)
+    cdef PyCodeObject* code = <PyCodeObject*> func.func_code
+    cdef int nlocalsplus = code.co_nlocalsplus
+    cdef _Py_CODEUNIT* code_start = <_Py_CODEUNIT*> code.co_code_adaptive
+    cdef int stack_size = stack_size_hint
+    if stack_size < 0:
+        stack_size = frame.stacktop
+    elif frame.stacktop >= 0 and stack_size > frame.stacktop:
+        raise ValueError(f"invalid stack size hint: {stack_size_hint}, actual size: {frame.stacktop}") 
+    if stack_size < 0:
+        raise ValueError("require a hint for stack size")
+
+    CALL = dis.opmap["CALL"]
+    instr_offset = frame.prev_instr - code_start
+
+    captured = {
+        "func": <object> func,
+        "nlocals": [
+            <object> frame.localsplus[i]
+                if frame.localsplus[i] != NULL else NullObject
+            for i in range(nlocalsplus)
+        ],
+        "stack": [
+            <object> frame.localsplus[nlocalsplus + i]
+                if frame.localsplus[nlocalsplus + i] != NULL else NullObject
+            for i in range(stack_size)
+        ],
+        "instr_offset": instr_offset,
+    }
+    for obj in chain(captured["nlocals"], captured["stack"]):
+        Py_INCREF(obj)
+    Py_INCREF(<object> func)
+    return captured
+
+def snapshot_frame(frame: FrameType, stack_size_hint: int = -1):
+    cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*>frame)
+    return _do_snapshot_frame(_frame, stack_size_hint)
+
+def eval_frame(
+    func: FunctionType,
+    nlocals: List[Any],
+    stack: List[Any],
+    instr_offset: int, 
+    exc_states: Optional[ExceptionStates] = None,
+) -> EvaluateResult:
+    cdef PyFunctionObject* func_obj = <PyFunctionObject*>func
+    cdef PyThreadState* state = PyThreadState_GET()
+    cdef PyCodeObject * code = <PyCodeObject*> func_obj.func_code;
+    cdef size_t size = code.co_nlocalsplus + code.co_stacksize + frame_specials_size();
+    cdef _PyInterpreterFrame *frame = <_PyInterpreterFrame*> malloc(sizeof(PyObject*) * size)
+
+    _PyFrame_InitializeSpecials(
+        frame,
+        <PyFunctionObject*> func_obj,
+        func_obj.func_globals,
+        code.co_nlocalsplus
+    )
+    frame.prev_instr = &(<_Py_CODEUNIT*>(code.co_code_adaptive))[instr_offset]
+    init_locals_and_stack(frame, nlocals, stack, code.co_nlocalsplus)
+    do_exc = 0
+    if exc_states is not None:
+        if PyErr_Occurred() != NULL:
+            _, exc_prev, _ = fetch_exception()
+            PyErr_Clear()
+            raise RuntimeError("eval a frame when exception has been raised")\
+                from exc_prev
+        restore_exception(exc_states)
+        do_exc = 1
+    cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
+    free(frame)
+    if result == NULL:
+        exc_states = fetch_exception()
+        return EvaluateResult(NullObject, exc_states)
+    return EvaluateResult(<object> result, None)

@@ -7,6 +7,8 @@ from .frame import (
     restore_thread_state,
     save_thread_state,
     set_profile,
+    snapshot_frame,
+    eval_frame,
     set_profile_all_threads,
     snapshot,
 )
@@ -20,6 +22,11 @@ from .generator import (
     setup_generator,
     snapshot_generator,
     snapshot_generator_frame,
+    snapshot_frame_generator,
+    generator_push_stack,
+    generator_set_instr_offset,
+    generator_resume,
+    generator_shrink_stack,
 )
 
 __all__ = [
@@ -28,6 +35,9 @@ __all__ = [
     "ExceptionStates",
     "restore_thread_state",
     "save_thread_state",
+    "set_profile",
+    "snapshot_frame",
+    "eval_frame",
     "snapshot",
     "get_generator",
     "get_generator_type",
@@ -41,4 +51,9 @@ __all__ = [
     "make_new_generator",
     "setup_generator",
     "set_profile_all_threads",
+    "snapshot_frame_generator",
+    "generator_push_stack",
+    "generator_set_instr_offset",
+    "generator_resume",
+    "generator_shrink_stack",
 ]

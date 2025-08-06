@@ -1,6 +1,6 @@
 import json
 import logging
-from types import FunctionType
+from types import CodeType, FunctionType
 from typing import Callable, Dict, List, Optional, Tuple
 
 from bytecode import BasicBlock, Bytecode, ControlFlowGraph, SetLineno
@@ -128,6 +128,40 @@ def analyze_stack_top(
         dump_code_and_offset(
             logger,
             func.__code__,
+            last_instr,
+            error_msg,
+            False,
+        )
+        raise RuntimeError(error_msg)
+
+    return eval_result[last_instr]
+
+def analyze_stack_size(
+    code: CodeType,
+    last_instr: int,
+    is_generator: bool,
+):
+    byte_code = Bytecode.from_code(code, conserve_exception_block_stackdepth=True)
+
+    cfg = ControlFlowGraph.from_bytecode(byte_code)
+    try:
+        eval_result = _symbolic_eval(cfg, is_generator)
+    except RuntimeError as e:
+        dump_code_and_offset(
+            logger,
+            code,
+            last_instr,
+            str(e),
+            False,
+        )
+        raise
+
+    if last_instr not in eval_result:
+        error_msg = f"invalid instr idx:{last_instr},\
+            analyze result:{json.dumps(eval_result, indent=4, ensure_ascii=False)}"
+        dump_code_and_offset(
+            logger,
+            code,
             last_instr,
             error_msg,
             False,

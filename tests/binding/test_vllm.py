@@ -6,8 +6,6 @@ from io import BytesIO, StringIO
 from multiprocessing import Process
 from typing import Any, Callable, Optional
 
-import cloudpickle
-import ray
 import torch
 from dill import Unpickler
 from tokenizers.decoders import DecodeStream
@@ -20,16 +18,11 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.executor.ray_distributed_executor import RayDistributedExecutor
-from vllm.worker.worker_base import WorkerWrapperBase
 
 from pyckpt import objects
 from pyckpt.binding import torch as patch_torch
 from pyckpt.binding import vllm as patch_vllm
 from pyckpt.binding.vllm import (
-    CapturedGPUModelRunner,
-    get_cache_blocks_v1,
-    get_req_cache_block_ids,
     prepare_engine,
     reduce_decode_stream,
     reduce_engine_core,
@@ -355,7 +348,7 @@ def test_vllm_reduce_engine_pp():
         return partial(_step_engine_and_process, num_step)
 
     q = make_queue()
-    dumper = run_spawned(_test_reduce_engine, q, step(128), 1, 2)
+    dumper = run_spawned(_test_reduce_engine, q, step(128), 2, 2)
     engine_data, storages = q.get()
     join_safe(dumper)
 

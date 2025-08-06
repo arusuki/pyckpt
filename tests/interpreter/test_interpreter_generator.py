@@ -1,11 +1,13 @@
+import dis
 import inspect
-from types import FrameType, FunctionType
-from typing import Generator
+from types import CodeType, FrameType, FunctionType
+from typing import Any, Generator
 
 import dill
 import pytest
 
-from pyckpt.analyzer import analyze_stack_top
+from pyckpt.analyzer import analyze_stack_size
+from pyckpt.frame import _fix_non_leaf_call, _offset_without_cache
 from pyckpt.interpreter import frame as _frame
 from pyckpt.interpreter import generator as _generator
 
@@ -16,6 +18,13 @@ def _make_new_generator_from_function(func: FunctionType):
         func_name=func.__name__,
         func_qualname=func.__qualname__,
     )
+
+
+def lasti_2_instr_offset(code: CodeType, f_lasti: int):
+    code_array = list(dis.get_instructions(code, show_caches=True))
+    instr_offset = _fix_non_leaf_call(code_array, f_lasti // 2)
+    assert code_array[instr_offset].opcode == dis.opmap["YIELD_VALUE"]
+    return _offset_without_cache(code_array, instr_offset)
 
 
 def test_snapshot_generator():
@@ -59,7 +68,13 @@ def test_make_generator():
     assert gen_ret is gen
 
     gen_states = _generator.snapshot_generator(gen_ret)
-    frame_states = _frame.snapshot(frame, False, analyze_stack_top)
+    assert isinstance(frame.f_code, CodeType)
+    stack_size = analyze_stack_size(
+        frame.f_code,
+        lasti_2_instr_offset(frame.f_code, frame.f_lasti),
+        is_generator=True,
+    )
+    frame_states = _frame.snapshot_frame(frame, stack_size - 1)
     for i, obj in enumerate(frame_states["stack"]):
         if isinstance(obj, FrameType):
             frame_states["stack"][i] = None
@@ -99,6 +114,21 @@ def test_make_new_generator():
         next(new_gen)
 
 
+def _get_gen_frame_states(gen: Generator):
+    frame = gen.gi_frame
+    stack_size = analyze_stack_size(
+        frame.f_code,
+        lasti_2_instr_offset(frame.f_code, frame.f_lasti),
+        is_generator=True,
+    ) - 1
+    return _generator.snapshot_frame_generator(gen, stack_size)
+
+
+def _push_and_resume(gen: Generator, value: Any):
+    _generator.generator_push_stack(gen, value)
+    return _generator.generator_resume(gen, None)
+
+
 def test_setup_generator():
     def foo():
         yield 41
@@ -111,7 +141,7 @@ def test_setup_generator():
     gen = foo()
     assert next(gen) == 41
     gen_states = _generator.snapshot_generator(gen)
-    frame_states = _generator.snapshot_generator_frame(gen, analyze_stack_top)
+    frame_states = _get_gen_frame_states(gen)
     new_gen = _make_new_generator_from_function(foo)
     _generator.setup_generator(new_gen, gen_states, frame_states)
 
@@ -126,7 +156,7 @@ def test_setup_generator():
     wrong_gen = bar()
     assert next(wrong_gen) == 41
     gen_states = _generator.snapshot_generator(wrong_gen)
-    frame_states = _generator.snapshot_generator_frame(wrong_gen, analyze_stack_top)
+    frame_states = _get_gen_frame_states(wrong_gen)
 
     new_gen = _make_new_generator_from_function(foo)
     with pytest.raises(ValueError):
@@ -153,7 +183,7 @@ def test_snapshot_generator_frame():
 
     gen_states = _generator.snapshot_generator(gen)
     assert gen_states["suspended"]
-    frame_states = _generator.snapshot_generator_frame(gen, analyze_stack_top)
+    frame_states = _get_gen_frame_states(gen)
     new_gen = _generator.make_generator(gen_states, frame_states)
     with pytest.raises(StopIteration):
         assert next(gen) == 42
@@ -171,7 +201,7 @@ def test_resume_generator():
     gen = foo()
     assert next(gen) == 41
 
-    ret, exc = _generator.resume_generator(gen, False, None)
+    ret, exc = _push_and_resume(gen, None)
     assert exc is None
     assert ret == 42
 
@@ -190,11 +220,11 @@ def test_generator_execution_with_exception():
 
     gen_states = _generator.snapshot_generator(gen)
     assert isinstance(gen_states["exception"], RuntimeError)
-    frame_states = _generator.snapshot_generator_frame(gen, analyze_stack_top)
+    frame_states = _get_gen_frame_states(gen)
     assert gen_states["gi_frame_state"] == -1
     # continue execution
     new_gen = _generator.make_generator(gen_states, frame_states)
-    ret, exc = _generator.resume_generator(new_gen, False, None)
+    ret, exc = _push_and_resume(new_gen, None)
     assert ret == 42
     assert exc is None
     # reraise exception
@@ -214,7 +244,7 @@ def test_resume_return_value():
     gen = foo()
     assert next(gen) == 42
     # then resume
-    ret, exc = _generator.resume_generator(gen, False, "43")
+    ret, exc = _push_and_resume(gen, "43")
     assert ret is _frame.NullObject
     assert exc is not None
     assert isinstance(exc[1], AssertionError)
@@ -222,7 +252,7 @@ def test_resume_return_value():
 
     gen = foo()
     assert next(gen) == 42
-    ret, exc = _generator.resume_generator(gen, False, "42")
+    ret, exc = _push_and_resume(gen, "42")
     assert ret is None
     assert exc is not None
     assert isinstance(exc[1], StopIteration)
@@ -235,10 +265,9 @@ def test_resume_with_exception():
 
     gen = foo()
     assert next(gen) == 42
-    ret, exc = _generator.resume_generator(
+    _generator.generator_push_stack(gen, None)
+    ret, exc = _generator.generator_resume(
         gen,
-        False,
-        None,
         (RuntimeError, RuntimeError("42"), None),
     )
     assert ret is _frame.NullObject

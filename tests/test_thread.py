@@ -1,3 +1,4 @@
+import dis
 import logging
 import sys
 import threading
@@ -471,10 +472,19 @@ def test_thread_function_call():
     def py_foo():
         pass
 
+    def number():
+        i = 0
+        while True:
+            i += 1
+            yield i 
+
+
     def test_func():
+        gen = number()
         while not _test_lock.acquire(blocking=False):
             sleep(0.1)
             py_foo()
+            next(gen)
 
         if _test_lock.locked():
             _test_lock.release()
@@ -488,18 +498,19 @@ def test_thread_function_call():
                 nonlocal counter
                 global _test_lock
                 counter += 1
-                if counter >= 10:
+                if counter >= 20:
                     _test_lock.release()
                     interpreter.set_profile(None)
                     print("ret")
                     return
-                print("hit: ", EVENT_TO_NAME[event], arg, frame, f"last_i: {frame.f_lasti}")
+                print("hit: ", EVENT_TO_NAME[event], arg, frame, f"last_i: {frame.f_lasti} ", end="")
+                print(f"prev last_i: {frame.f_back.f_lasti if frame.f_back else None}")
             except Exception as e:
                 print(f"exception: {e}")
                 interpreter.set_profile(None)
 
         interpreter.set_profile(watcher)
         test_func()
-
+    dis.dis(test_func)
     foo()
-    assert counter == 10
+    assert counter == 20

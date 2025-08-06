@@ -30,6 +30,7 @@ from pyckpt.interpreter.frame import NullObject, NullObjectType
 from pyckpt.interpreter.generator import (
     get_generator_type,
     make_generator,
+    snapshot_frame_generator,
     snapshot_generator,
     snapshot_generator_frame,
 )
@@ -59,6 +60,15 @@ def reduce_generator(gen: Generator):
         (
             snapshot_generator(gen),
             snapshot_generator_frame(gen, analyze_stack_top),
+        ),
+    )
+
+def reduce_generator_v1(gen: Generator):
+    return (
+        make_generator,
+        (
+            snapshot_generator(gen),
+            snapshot_frame_generator(gen),
         ),
     )
 
