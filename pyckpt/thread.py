@@ -1,15 +1,15 @@
 import inspect
-from io import StringIO
 import logging
-from multiprocessing import Process
 import sys
 import threading
+import traceback
 from _thread import LockType as LockType
 from contextlib import contextmanager
 from dataclasses import dataclass
+from io import StringIO
 from itertools import chain
+from multiprocessing import Process
 from threading import Event, Thread, _active
-import traceback
 from types import FrameType
 from typing import (
     Any,

@@ -1,6 +1,6 @@
 import dis
 import inspect
-from types import FrameType
+from types import CodeType, FrameType
 from typing import Generator, Optional
 
 import pytest
@@ -161,3 +161,28 @@ def test_snapshot_generator_from_frame():
     assert isinstance(g, Generator)
     assert gen is g
 
+def test_current_cframe_id():
+    
+    def foo(cframe_id):
+        current = _frame.cframe_id()
+        assert cframe_id == current
+        bar(current)
+
+    def bar(cframe_id):
+        current = _frame.cframe_id()
+        assert cframe_id == current
+    
+    foo(_frame.cframe_id())
+
+
+def test_frame_lasti_opcode():
+
+    def foo():
+        bar()
+
+    def bar():
+        frame = inspect.currentframe().f_back
+        opcode = _frame.frame_lasti_opcode(frame)
+        assert opcode == dis.opmap["CALL"]
+
+    foo()

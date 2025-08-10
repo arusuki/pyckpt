@@ -184,6 +184,7 @@ cdef extern from "pystate.h":
 
     ctypedef struct _PyCFrame:
         void* current_frame
+        _PyCFrame *previous
 
     ctypedef struct PyThreadState:
         _PyCFrame* cframe
@@ -206,6 +207,4 @@ cdef extern from "pystate.h":
     cdef PyThreadState *PyThreadState_Next(PyThreadState *tstate)
 
 cdef extern from "pythread.h":
-    ctypedef struct PyThreadState:
-        pass
     cdef unsigned long PyThread_get_thread_ident()

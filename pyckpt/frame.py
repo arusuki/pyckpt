@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import dis
 from enum import IntEnum
+import logging
 from types import FrameType, FunctionType
 from typing import Any, Callable, Generator, List, NamedTuple, Optional, Tuple, Type
 
@@ -12,6 +13,9 @@ from pyckpt.interpreter import EvaluateResult, ExceptionStates, get_generator
 Analyzer = Callable[[FunctionType, int, bool], int]
 
 CACHE = dis.opmap["CACHE"]
+PRECALL = dis.opmap["PRECALL"]
+
+logger = logging.getLogger(__name__)
 
 
 class LiveFrame(ABC):
@@ -152,6 +156,9 @@ def snapshot_from_frame(
 CALL_INSTR_NAMES = ["CALL", "CALL_FUNCTION_EX"]
 CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
 
+RETURN_INSTR_NAMES = ["RETURN_VALUE", "YIELD_VALUE"]
+RETURN_CODES = [dis.opmap[name] for name in RETURN_INSTR_NAMES]
+
 
 class CaptureEvent(IntEnum):
     INTERMEDIATE = -1
@@ -182,8 +189,9 @@ class FrameStates(NamedTuple):
 
 
 class Frame(ABC):
-    def __init__(self, event: CaptureEvent):
+    def __init__(self, event: CaptureEvent, instr_offset: int):
         self.event = event
+        self.instr_offset = instr_offset
         self._requires_ret = event == CaptureEvent.INTERMEDIATE
 
     @abstractmethod
@@ -210,6 +218,8 @@ class Frame(ABC):
             raise ValueError(
                 f"{self} needs a return value, use `return_value()` to set a return value"
             )
+        if self.event != CaptureEvent.INTERMEDIATE:
+            self._set_instr_offset(self.instr_offset)
         return self._evaluate(exc_states)
 
 
@@ -217,15 +227,17 @@ class FunctionFrame(Frame):
     def __init__(
         self,
         event: CaptureEvent,
+        instr_offset: int,
         states: Optional[FrameStates] = None,
     ):
-        super().__init__(event)
+        super().__init__(event, instr_offset)
         self.states = states
+        self._override_instr_offset: Optional[int] = None
 
     def _set_instr_offset(self, instr_offset: int):
         if not self.states:
             raise ValueError("invliad fuction frame")
-        self.states.instr_offset = instr_offset
+        self._override_instr_offset = instr_offset
 
     def _set_return_value(self, value: Any):
         if not self.states:
@@ -235,29 +247,37 @@ class FunctionFrame(Frame):
     def _evaluate(self, exc_states: ExceptionStates) -> EvaluateResult:
         if not self.states:
             raise ValueError("invliad fuction frame")
+        instr_offset = (
+            self.states.instr_offset
+            if self._override_instr_offset is None
+            else self._override_instr_offset
+        )
         result = interpreter.eval_frame(
             func=self.states.func,
             nlocals=self.states.nlocals,
             stack=self.states.stack,
-            instr_offset=self.states.instr_offset,
+            instr_offset=instr_offset,
             exc_states=exc_states,
         )
         self.states = None
         return result
 
+
 class NotSetType: ...
+
 
 NOT_SET = NotSetType()
 
-class GeneratorFrame(Frame):
 
+class GeneratorFrame(Frame):
     def __init__(
         self,
         event: CaptureEvent,
+        instr_offset: int,
         generator: Optional[Generator],
         stack_size: int,
     ):
-        super().__init__(event)
+        super().__init__(event, instr_offset)
         self.generator = generator
         self.stack_size = stack_size
         self._return_value = NOT_SET
@@ -320,21 +340,68 @@ def snapshot_frame(
         last_instr=_offset_without_cache(code_array, instr_offset),
         is_generator=bool(generator),
     )
+
+    def check_opcode(condition: Callable[[int], bool]):
+        try:
+            if instr_offset < 0:
+                raise ValueError(f"invalid instr_offset(-1) for event {event}")
+            opcode = code_array[instr_offset].opcode
+            if not condition(opcode):
+                op_name = dis.opname[opcode]
+                raise ValueError(f"invalid opcode {op_name} for event {event}")
+        except Exception:
+            logger.fatal("frame last_i: %s, event: %s", frame.f_lasti, event)
+            dis.dis(frame.f_code)
+            raise
+
+    def check_stack_size_with_args() -> tuple[int, int]:
+        current_offset = instr_offset - 1
+        current_offset = _fix_non_leaf_call(code_array, current_offset)
+        if current_offset >= 0 and code_array[current_offset] == PRECALL:
+            current_offset -= 1
+            _fix_non_leaf_call(code_array, current_offset)
+        return analyze_stack_size(
+            code=frame.f_code,
+            last_instr=_offset_without_cache(code_array, current_offset),
+            is_generator=bool(generator),
+        ), current_offset - 1
+
     if event == CaptureEvent.INTERMEDIATE:
-        if instr_offset < 0:
-            raise ValueError("invalid instr_offset(-1) for intermediate frame")
-        opcode = code_array[instr_offset].opcode
-        if opcode not in CALL_CODES:
-            op_name = dis.opname[opcode]
-            raise ValueError(f"invalid opcode {op_name} for intermediate frame")
+        check_opcode(lambda opcode: opcode in CALL_CODES)
         # remove the 'return value'
         stack_size -= 1
+
+    elif event == CaptureEvent.CALL:
+        if frame.f_lasti != 0:
+            raise RuntimeError(
+                f"frame {frame} call event with invalid frame last_i: {frame.f_lasti}"
+            )
+        instr_offset -= 1
+
+    elif event == CaptureEvent.RETURN:
+        check_opcode(lambda opcode: opcode in RETURN_CODES)
+        # add one for return value
+        if not generator:
+            stack_size += 1
+        # redo the return instruction
+        instr_offset -= 1
+
+    elif event == CaptureEvent.C_CALL:
+        check_opcode(lambda opcode: opcode in CALL_CODES)
+        stack_size, instr_offset = check_stack_size_with_args()
+
+    elif event == CaptureEvent.C_RETURN or event == CaptureEvent.C_EXCEPTION:
+        raise RuntimeError(f"receive unsupported event: {event}")
+
     else:
-        raise NotImplementedError(f"event: {event}")
+        logger.fatal("frame last_i: %s, event: %s", frame.f_lasti, event)
+        dis.dis(frame.f_code)
+        raise NotImplementedError(f"capture event not implemented: {event}")
 
     if generator:
-        return GeneratorFrame(event, generator, stack_size)
+        return GeneratorFrame(event, instr_offset, generator, stack_size)
 
     captured = interpreter.snapshot_frame(frame, stack_size)
+    logger.debug("captured: %s", captured)
 
-    return FunctionFrame(event, FrameStates.from_captured(captured))
+    return FunctionFrame(event, instr_offset, FrameStates.from_captured(captured))

@@ -11,6 +11,9 @@ from .frame import (
     eval_frame,
     set_profile_all_threads,
     snapshot,
+    cframe_id,
+    cframe_backtrace,
+    frame_lasti_opcode,
 )
 from .generator import (
     get_generator_type,
@@ -56,4 +59,7 @@ __all__ = [
     "generator_set_instr_offset",
     "generator_resume",
     "generator_shrink_stack",
+    "cframe_id",
+    "cframe_backtrace",
+    "frame_lasti_opcode",
 ]

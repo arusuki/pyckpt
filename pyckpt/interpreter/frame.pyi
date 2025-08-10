@@ -1,6 +1,6 @@
 from builtins import FrameType, FunctionType
 from threading import Thread
-from types import TracebackType
+from types import CodeType, TracebackType
 from typing import Analyzer, Any, NamedTuple, Optional, Type
 
 CALL_CODES: list
@@ -68,3 +68,9 @@ def eval_frame(
     instr_offset: int,
     exc_states: ExceptionStates | None = None,
 ) -> tuple[Any, ExceptionStates | None]: ...
+
+def cframe_id(backtrace=1) -> int: ...
+
+def cframe_backtrace() -> list[int, CodeType]: ...
+
+def frame_lasti_opcode(frame: FrameType) -> int: ...

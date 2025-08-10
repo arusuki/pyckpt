@@ -1,3 +1,4 @@
+from functools import lru_cache
 import json
 import logging
 from types import CodeType, FunctionType
@@ -136,26 +137,30 @@ def analyze_stack_top(
 
     return eval_result[last_instr]
 
-def analyze_stack_size(
-    code: CodeType,
-    last_instr: int,
-    is_generator: bool,
-):
-    byte_code = Bytecode.from_code(code, conserve_exception_block_stackdepth=True)
 
+@lru_cache(maxsize=64)
+def _cached_evaluate(code: CodeType, is_generator: bool):
+    byte_code = Bytecode.from_code(code, conserve_exception_block_stackdepth=True)
     cfg = ControlFlowGraph.from_bytecode(byte_code)
     try:
-        eval_result = _symbolic_eval(cfg, is_generator)
+        return _symbolic_eval(cfg, is_generator)
     except RuntimeError as e:
         dump_code_and_offset(
             logger,
             code,
-            last_instr,
+            0,
             str(e),
             False,
         )
         raise
 
+
+def analyze_stack_size(
+    code: CodeType,
+    last_instr: int,
+    is_generator: bool,
+):
+    eval_result = _cached_evaluate(code, is_generator)
     if last_instr not in eval_result:
         error_msg = f"invalid instr idx:{last_instr},\
             analyze result:{json.dumps(eval_result, indent=4, ensure_ascii=False)}"

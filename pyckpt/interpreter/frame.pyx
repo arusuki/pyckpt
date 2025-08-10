@@ -48,6 +48,8 @@ cdef extern from "Python.h":
     cdef void PyThread_release_lock(PyThread_type_lock lock)
     cdef int _PyEval_SetProfile(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
     cdef int _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
+    cdef PyObject *PyCode_GetCode(PyCodeObject *co)
+    cdef char *PyBytes_AS_STRING(PyObject *string)
 
 
 if (3, 11) <= sys.version_info <= (3, 12):
@@ -475,3 +477,52 @@ def eval_frame(
         exc_states = fetch_exception()
         return EvaluateResult(NullObject, exc_states)
     return EvaluateResult(<object> result, None)
+
+cpdef int cframe_id(int backtrace = 1):
+    cdef PyThreadState* state = PyThreadState_GET()
+    cdef _PyCFrame* previous = state.cframe
+    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> previous.current_frame
+    if backtrace < 0:
+        raise ValueError(f"invalid backtrace value {backtrace}")
+    
+    for _ in range(backtrace):
+        previous = previous.previous
+        if previous == NULL:
+            return 0
+        frame = <_PyInterpreterFrame*> previous.current_frame
+
+    return <int> previous
+
+cpdef list cframe_backtrace():
+    ret = []
+    cdef PyThreadState* state = PyThreadState_GET()
+    cdef _PyCFrame* previous = state.cframe
+    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> previous.current_frame
+    
+    while True:
+        previous = previous.previous
+        if previous == NULL:
+            ret.append((0, None))
+            return ret
+        frame = <_PyInterpreterFrame*> previous.current_frame
+        if frame == NULL:
+            ret.append((<int> previous, NullObject))
+        else:
+            Py_INCREF(<object> frame.f_func)
+            ret.append((<int> previous, <object> frame.f_func))
+
+    return ret
+
+cpdef int frame_lasti_opcode(object frame):
+    cdef PyCodeObject* code = <PyCodeObject*> frame.f_code
+    cdef PyObject* code_bytes = PyCode_GetCode(code)
+    cdef unsigned char* codes = <unsigned char*> PyBytes_AS_STRING(code_bytes)
+    cdef int last_i = frame.f_lasti
+    if last_i < 0:
+        return 0
+    assert sizeof(_Py_CODEUNIT) == 2
+    while codes[last_i] == 0:
+        last_i -= sizeof(_Py_CODEUNIT)
+        if last_i < 0:
+            return 0
+    return codes[last_i]
