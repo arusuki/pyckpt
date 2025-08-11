@@ -21,6 +21,7 @@ from pyckpt.binding.torch import (
 from tests.utils import run_spawned
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+from tests.utils import dump, load, copy
 
 def join_safe(process: Process):
     process.join()
@@ -64,17 +65,17 @@ class SimpleNN(nn.Module):
 def test_torch_simple_module():
     m = SimpleNN(10, 10, 10)
     buffer = BytesIO()
-    p = objects.dump(buffer, m)
+    p = dump(buffer, m)
     buffer.seek(0)
-    nm, _ = objects.load(buffer, p)
+    nm, _ = load(buffer, p)
     assert isinstance(nm, SimpleNN)
 
     if torch.cuda.is_available():
         m = m.cuda()
     buffer.seek(0)
-    p = objects.dump(buffer, m)
+    p = dump(buffer, m)
     buffer.seek(0)
-    nm, _ = objects.load(buffer, p)
+    nm, _ = load(buffer, p)
     assert isinstance(nm, SimpleNN)
 
 
@@ -82,7 +83,7 @@ def test_torch_simple_module():
 def test_torch_cuda_device_property():
     property = cuda_get_device_properties()
     buffer = BytesIO()
-    objects.dump(buffer, property)
+    dump(buffer, property)
 
 
 def test_torch_tensor_to_numpy():
@@ -115,7 +116,7 @@ def test_torch_dump_tensor_numpy():
     assert torch.is_tensor(n.base)
     assert n.base.untyped_storage().data_ptr() == t.untyped_storage().data_ptr()
 
-    (new_t, new_n), _ = objects.copy((t, n))
+    (new_t, new_n), _ = copy((t, n))
     assert isinstance(new_t, torch.Tensor)
     assert isinstance(new_n, numpy.ndarray)
     assert torch.is_tensor(new_n.base)

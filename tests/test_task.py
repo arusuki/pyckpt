@@ -204,7 +204,8 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
         lock.release()
         server.join()
     
-    saved, objs = load_checkpoint(str(tmpdir), filename)
+    loaded_checkpoint = load_checkpoint(str(tmpdir), filename)
+    saved, _, _ = loaded_checkpoint
     assert len(saved) == 1
     thread = next(iter(saved.values()))
     assert isinstance(thread, TaskThread)
@@ -225,4 +226,4 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
 
     print(saved)
 
-    resume_checkpoint(saved, objs, f"localhost:{find_free_port()}")
+    resume_checkpoint(loaded_checkpoint , f"localhost:{find_free_port()}")

@@ -10,7 +10,7 @@ from functools import wraps
 from threading import Thread, _active
 import traceback
 from types import FrameType
-from typing import Any, Callable, Optional, ParamSpec, TypeVar, cast
+from typing import Any, Callable, NamedTuple, Optional, ParamSpec, TypeVar, cast
 from urllib.parse import urlparse
 
 import forbiddenfruit as patch
@@ -88,7 +88,6 @@ class Task:
         daemon_addr: str,
     ):
         self.name = name
-        # thread -> cframe_id
         self.threads: set[Thread] = set()
         self.blocking_threads: set[Thread] = set()
         self._server = rpc.Server(TaskDaemon())
@@ -380,21 +379,33 @@ def _patch_locks():
         patch.curse(LockType, "acquire", _original_lock_acquire)
 
 
+class LoadedCheckpoint(NamedTuple):
+    task_threads: SavedTask
+    persisted: PersistedObjects
+    loaded_objects: dict[int, Any]
+
+
 def load_checkpoint(
     checkpoint_path: str,
     name: str,
-) -> tuple[SavedTask, PersistedObjects]:
+) -> LoadedCheckpoint:
     checkpoint_filename_base = os.path.join(checkpoint_path, name)
 
     with open(checkpoint_filename_base + ".data", "rb") as data_file:
-        persisted_objects = DataUnpickler(data_file).load()
-
-    # TODO(arusuki): initialize persisted objects here
+        persisted = DataUnpickler(data_file).load()
+    assert isinstance(persisted, PersistedObjects)
 
     with open(checkpoint_filename_base + ".ckpt", "rb") as checkpoint_file:
-        threads = Unpickler(checkpoint_file, persisted_objects).load()
+        unpickler = Unpickler(checkpoint_file, persisted)
+        saved_task = unpickler.load()
+        assert isinstance(saved_task, dict)
+        loaded_objects = unpickler.get_loaded_objects()
 
-    return (threads, persisted_objects)
+    return LoadedCheckpoint(
+        task_threads=saved_task,
+        persisted=persisted,
+        loaded_objects=loaded_objects,
+    )
 
 
 def run_task_thread(thread: TaskThread):
@@ -427,19 +438,28 @@ def run_task_thread(thread: TaskThread):
 
 
 def resume_checkpoint(
-    threads: SavedTask,
-    persisted_objects: PersistedObjects,
+    checkpoint: LoadedCheckpoint,
     address="localhost:9387",
     wait_shutdown=True,
 ):
-    if len(threads) > 1:
-        raise NotImplementedError("resume_checkpoint: multiple worker threads")
+    workers: list[Thread] = []
+    for tid, task_thread in checkpoint.task_threads.items():
+        if tid in checkpoint.loaded_objects:
+            thread = checkpoint.loaded_objects[tid]
+            assert isinstance(thread, Thread)
+        else:
+            thread = object.__new__(Thread)
+        thread.__init__(target=run_task_thread, args=(task_thread,))
+        workers.append(thread)
 
     @main(address=address, wait_shutdown=wait_shutdown)
     def _resume():
-        # TODO(arusuki): launch other worker threads here
-        _tid, thread = threads.popitem()
-        run_task_thread(thread)
+        for worker in workers:
+            worker.start()
+
+        for worker in workers:
+            # FIXME: only join main thread
+            worker.join()
 
     _resume()
 

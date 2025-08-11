@@ -5,17 +5,12 @@ from queue import SimpleQueue
 from threading import Thread
 from typing import Generator
 
+import dill
 import pytest
 import torch
 
-from pyckpt.objects import (
-    Pickler,
-    copy,
-    dump,
-    load,
-    load_untyped_storages,
-    save_untyped_storages,
-)
+from pyckpt.objects import Pickler
+from tests.utils import dump, load, copy
 
 
 def test_dump_basic_object():
@@ -79,8 +74,8 @@ def test_load_with_threads():
     pickler = Pickler(buf)
     _threads = dump(pickler, obj)
     buf.seek(0)
-    assert Thread in _threads
-    assert id(thread) in _threads[Thread]
+    assert Thread in _threads._persisted
+    assert id(thread) in _threads._persisted[Thread]
 
     loaded, objs = load(buf, _threads)
     assert "thread" in loaded
@@ -107,6 +102,7 @@ def test_load_with_generator():
     with pytest.raises(StopIteration):
         next(loaded)
 
+
 def test_reduce_simple_queue():
     sq = SimpleQueue()
     sq.put(42)
@@ -121,33 +117,31 @@ def test_reduce_simple_queue():
     assert loaded.get(block=False) == 42
     assert loaded.get(block=False) == 43
 
+
 def test_save_tensor_storage_dump_load():
     x = torch.tensor(range(12)).reshape(3, 4)
     if torch.cuda.is_available():
         x = x.cuda()
     file = io.BytesIO()
-    s = io.BytesIO()
-    stores = dump(file, x)
-    save_untyped_storages(s, stores["storage"])
+    persisted = dump(file, x)
 
-    s.seek(0)
     file.seek(0)
-    stores["storage"] = load_untyped_storages(s)
-    new_x, _ = load(file, stores)
+    new_x, _ = load(file, persisted)
 
     assert torch.equal(x, new_x)
     assert x.device == new_x.device
+
 
 def test_save_tensor_storage_copy():
     x = torch.tensor(range(12)).reshape(3, 4)
     x_slice = x[2]
     (new_x, new_x_slice), _ = copy((x, x_slice))
 
-    assert new_x.untyped_storage() == \
-      new_x_slice.untyped_storage()
+    assert new_x.untyped_storage() == new_x_slice.untyped_storage()
 
     assert torch.equal(x, new_x)
     assert torch.equal(x_slice, new_x_slice)
+
 
 def test_save_multiple_tensors():
     x = torch.tensor(range(12)).reshape(3, 4)
@@ -156,7 +150,5 @@ def test_save_multiple_tensors():
     assert x.untyped_storage()._cdata != y.untyped_storage()._cdata
 
     file = io.BytesIO()
-    s = io.BytesIO()
-    stores = dump(file, (x, y))["storage"]
-    assert len(stores) == 2
-
+    persisted = dump(file, (x, y))
+    assert len(persisted.get_tensor_storage()) == 2

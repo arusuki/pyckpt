@@ -219,6 +219,7 @@ class Frame(ABC):
                 f"{self} needs a return value, use `return_value()` to set a return value"
             )
         if self.event != CaptureEvent.INTERMEDIATE:
+            logger.debug("evaluate: set instr offset to %s", self.instr_offset)
             self._set_instr_offset(self.instr_offset)
         return self._evaluate(exc_states)
 
@@ -245,6 +246,7 @@ class FunctionFrame(Frame):
         self.states.stack.append(value)
 
     def _evaluate(self, exc_states: ExceptionStates) -> EvaluateResult:
+        logger.debug("evaluate: %s, override instr_offset: %s", self.states, self._override_instr_offset)
         if not self.states:
             raise ValueError("invliad fuction frame")
         instr_offset = (
@@ -356,15 +358,18 @@ def snapshot_frame(
 
     def check_stack_size_with_args() -> tuple[int, int]:
         current_offset = instr_offset - 1
+        redo_instr_offset = current_offset # CALL <- redo 
         current_offset = _fix_non_leaf_call(code_array, current_offset)
+
         if current_offset >= 0 and code_array[current_offset] == PRECALL:
             current_offset -= 1
-            _fix_non_leaf_call(code_array, current_offset)
+            redo_instr_offset = current_offset # PRECALL <- redo 
+            current_offset = _fix_non_leaf_call(code_array, current_offset)
         return analyze_stack_size(
             code=frame.f_code,
             last_instr=_offset_without_cache(code_array, current_offset),
             is_generator=bool(generator),
-        ), current_offset - 1
+        ), redo_instr_offset
 
     if event == CaptureEvent.INTERMEDIATE:
         check_opcode(lambda opcode: opcode in CALL_CODES)
