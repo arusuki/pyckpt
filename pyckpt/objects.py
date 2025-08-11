@@ -190,8 +190,24 @@ def save_numpy_with_tensor_base(
 class StorageID(Tuple): ...
 
 
+class BuiltinMethodID(str): ...
+
+
+BUILTIN_METHODS_TO_ID: dict[Callable, BuiltinMethodID] = {}
+ID_TO_BUILTIN_METHODS: dict[BuiltinMethodID, Callable] = {}
+
+
+def register_builtin(function: Callable):
+    function_id = BuiltinMethodID(function.__name__)
+    if function_id in ID_TO_BUILTIN_METHODS:
+        raise RuntimeError("duplicated builtin methods")
+    ID_TO_BUILTIN_METHODS[function_id] = function
+    BUILTIN_METHODS_TO_ID[function] = function_id
+    return function
+
+
 class Pickler(dill.Pickler):
-    def __init__(self, file, *args, **kwds):
+    def __init__(self, file, builtin_methods=set(), *args, **kwds):
         super().__init__(file, *args, **kwds)
         self.dispatch_table = copyreg.dispatch_table.copy()
         self.dispatch_table.update(dispatch_table())
@@ -200,10 +216,19 @@ class Pickler(dill.Pickler):
         self.id_map: dict[int, str] = {}
 
         self._persisted = PersistedObjects(self.serialized_storages)
+        self._builtin_methods = builtin_methods
 
     def persistent_id(self, obj):
         if isinstance(obj, torch.storage.TypedStorage) or torch.is_storage(obj):
             return self._persistent_id_storage(obj)
+        if obj.__hash__ is not None:
+            try:
+                obj_id = BUILTIN_METHODS_TO_ID.get(obj, None)
+                if obj_id is not None:
+                    return obj_id
+            except TypeError:
+                # some class has __hash__ method but raises TypeError at runtime
+                return None
         obj_type = type(obj)
         if obj_type in PersistType:
             return self._persisted.persist_object(obj)
@@ -283,6 +308,8 @@ class Unpickler(dill.Unpickler):
     def persistent_load(self, pid: int | StorageID):
         if isinstance(pid, StorageID):
             return self._persistent_load_storage(pid)
+        elif isinstance(pid, BuiltinMethodID):
+            return ID_TO_BUILTIN_METHODS[pid]
         return self._loaded_objects[pid]
 
     def get_loaded_objects(self) -> Dict[int, Any]:
@@ -316,4 +343,3 @@ class Unpickler(dill.Unpickler):
         )
         self._typed_storages[storage_key] = typed_storage
         return typed_storage
-

@@ -361,7 +361,7 @@ def snapshot_frame(
         redo_instr_offset = current_offset # CALL <- redo 
         current_offset = _fix_non_leaf_call(code_array, current_offset)
 
-        if current_offset >= 0 and code_array[current_offset] == PRECALL:
+        if current_offset >= 0 and code_array[current_offset].opcode == PRECALL:
             current_offset -= 1
             redo_instr_offset = current_offset # PRECALL <- redo 
             current_offset = _fix_non_leaf_call(code_array, current_offset)

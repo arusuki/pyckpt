@@ -1,28 +1,27 @@
-from io import StringIO
 import logging
 import os
 import sys
 import threading
 import time
+import traceback
+from _thread import LockType as LockType
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
+from io import BytesIO, StringIO
 from threading import Thread, _active
-import traceback
 from types import FrameType
 from typing import Any, Callable, NamedTuple, Optional, ParamSpec, TypeVar, cast
 from urllib.parse import urlparse
 
 import forbiddenfruit as patch
 import msgpackrpc as rpc
-
 from dill import Pickler as DataPickler
 from dill import Unpickler as DataUnpickler
-from pyckpt.frame import CALL_CODES, CaptureEvent, Frame, snapshot_frame
-from pyckpt.interpreter import set_profile_all_threads, frame_lasti_opcode
-from pyckpt.objects import PersistedObjects, Pickler, Unpickler
 
-from _thread import LockType as LockType
+from pyckpt.frame import CALL_CODES, CaptureEvent, Frame, FunctionFrame, snapshot_frame
+from pyckpt.interpreter import frame_lasti_opcode, set_profile_all_threads
+from pyckpt.objects import PersistedObjects, Pickler, Unpickler, register_builtin
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -340,7 +339,44 @@ def task_checkpoint(
             )
         excepthook = sys.excepthook
         sys.excepthook = sys.__excepthook__
-        checkpoint.dump(saved_task)
+
+        try:
+            checkpoint.dump(saved_task)
+        except Exception as e:
+            print(f"ok, start checking..., first read the exception: {e}")
+            current = None
+            try:
+                print(f"how many threads do you have?: {len(saved_task)}")
+                frames = next(iter(saved_task.values())).frames
+                i = 0
+                try:
+                    print("ok, let's find out...")
+                    newp = Pickler(BytesIO())
+                    frame = frames[0]
+                    try:
+                        assert isinstance(frame, FunctionFrame)
+                        try:
+                            # frame.states = frame.states._replace(nlocals=None)
+                            stack = frame.states.stack
+                            print(f"ok, the stack is {stack}")
+                            print(
+                                f"{id(stack[1]), id(_original_lock_acquire), id(_lock_acquire)}"
+                            )
+                            stack[1] = None
+                            print(f"after modifying: {stack}")
+                            frame.states = frame.states._replace(stack=stack)
+                        except Exception as e:
+                            print(f"so careless :( , this is a stupid error: {e}")
+                        newp.dump(frame)
+                        print("cool, it doesn't break this time")
+                    except Exception:
+                        print("ok...?")
+                except Exception:
+                    print(f"error at {i}, frame: {current}")
+            except Exception:
+                print(f"error checkpoint {current}")
+            raise
+
         persisted_objects = checkpoint.consume_persisted()
         data.dump(persisted_objects)
         sys.excepthook = excepthook
@@ -353,7 +389,7 @@ def _current_thread() -> Optional[Thread]:
     return _active.get(tid, None)
 
 
-_original_lock_acquire = LockType.acquire
+_original_lock_acquire = register_builtin(LockType.acquire)
 
 
 def _lock_acquire(self, blocking: bool = True, timeout: float = -1):

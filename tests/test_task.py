@@ -1,14 +1,24 @@
-import os
 import socket
+from _thread import LockType as LockType
 from threading import Event, Lock, Thread
 from typing import Optional
 
-import pytest
-from pyckpt.frame import CaptureEvent, FunctionFrame
-import pyckpt.task as task
-from pyckpt.task import Barrier, CapturedThreads, TaskThread, get_task, load_checkpoint, main, resume_checkpoint, task_stop_insepct
 import msgpackrpc as rpc
 import py
+import pytest
+
+import pyckpt.task as task
+from pyckpt.frame import CaptureEvent, FunctionFrame
+from pyckpt.task import (
+    Barrier,
+    CapturedThreads,
+    TaskThread,
+    get_task,
+    load_checkpoint,
+    main,
+    resume_checkpoint,
+    task_stop_insepct,
+)
 
 
 def find_free_port():
@@ -203,7 +213,7 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
     finally:
         lock.release()
         server.join()
-    
+
     loaded_checkpoint = load_checkpoint(str(tmpdir), filename)
     saved, _, _ = loaded_checkpoint
     assert len(saved) == 1
@@ -226,4 +236,4 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
 
     print(saved)
 
-    resume_checkpoint(loaded_checkpoint , f"localhost:{find_free_port()}")
+    resume_checkpoint(loaded_checkpoint, f"localhost:{find_free_port()}")
