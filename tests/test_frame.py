@@ -9,6 +9,7 @@ import pytest
 from pyckpt import interpreter, objects
 from pyckpt.frame import FunctionFrame, GeneratorFrame, snapshot_frame
 from pyckpt.interpreter.frame import NullObject
+from tests.utils import copy
 
 
 def test_snapshot_frame():
@@ -20,7 +21,7 @@ def test_snapshot_frame():
         return lhs + rhs
 
     assert add(1, 1) == 2
-    frame_, _ = objects.copy(frame_)
+    frame_, _ = copy(frame_)
     assert isinstance(frame_, FunctionFrame)
     assert frame_._requires_ret
 
@@ -30,7 +31,7 @@ def test_snapshot_frame():
 
     # try different arguments
     assert add(3, 4) == 7
-    frame_, _ = objects.copy(frame_)
+    frame_, _ = copy(frame_)
     assert isinstance(frame_, FunctionFrame)
     result, err = frame_.return_value(None).evaluate()
     assert result == 7
@@ -60,7 +61,7 @@ def test_function_frame_copy():
         return cocoon, "hello"
 
     frame_, ret1 = capture_frame()
-    frame_1, _ = objects.copy(frame_)
+    frame_1, _ = copy(frame_)
     (frame_2, ret2), err = frame_1.return_value(frame_).evaluate()
 
     assert err is None
@@ -99,8 +100,8 @@ def test_function_frame_eval_exception():
     assert isinstance(inner_frame, FunctionFrame)
 
     frames = [outer_frame, inner_frame]
-    evaluate(objects.copy(frames)[0])  # first
-    evaluate(objects.copy(frames)[0])  # second
+    evaluate(copy(frames)[0])  # first
+    evaluate(copy(frames)[0])  # second
 
 def test_function_frame_eval_with_thread_state():
     def capture_frame():
@@ -112,7 +113,7 @@ def test_function_frame_eval_with_thread_state():
             return (frame_, ts), "hello"
 
     (frame_, ts), ret1 = capture_frame()
-    frame_1, _ = objects.copy(frame_)
+    frame_1, _ = copy(frame_)
     interpreter.restore_thread_state(ts)
     frame_1.return_value(None).evaluate()
     assert ret1 == "hello"
@@ -120,7 +121,7 @@ def test_function_frame_eval_with_thread_state():
 
 def generator_frame_snapshot(gi_frame: FrameType):
     def copy_generator(gen: Generator) -> Generator:
-        cons, args = objects.reduce_generator_v1(gen)
+        cons, args = objects.reduce_generator(gen)
         return cons(*args)
 
     f = snapshot_frame(gi_frame)
@@ -183,7 +184,7 @@ def test_snapshot_function_frame_with_context_manager(capsys):
         with my_context_mgr() as s:
             frame_ = snapshot_frame(inspect.currentframe())
             if frame_:
-                new_frame_, _ = objects.copy(frame_)
+                new_frame_, _ = copy(frame_)
                 assert new_frame_.states.stack[0] is not frame_.states.stack[0]
                 return new_frame_
             else:

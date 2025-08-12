@@ -22,14 +22,12 @@ import torch
 from torch.serialization import default_restore_location as restore_location
 from torch.serialization import location_tag
 
-from pyckpt.analyzer import analyze_stack_top
 from pyckpt.interpreter.frame import NullObject, NullObjectType
 from pyckpt.interpreter.generator import (
     get_generator_type,
     make_generator,
     snapshot_frame_generator,
     snapshot_generator,
-    snapshot_generator_frame,
 )
 from pyckpt.interpreter.objects import snapshot_simple_queue
 
@@ -54,16 +52,6 @@ def reduce_as_none(_):
 
 
 def reduce_generator(gen: Generator):
-    return (
-        make_generator,
-        (
-            snapshot_generator(gen),
-            snapshot_generator_frame(gen, analyze_stack_top),
-        ),
-    )
-
-
-def reduce_generator_v1(gen: Generator):
     return (
         make_generator,
         (

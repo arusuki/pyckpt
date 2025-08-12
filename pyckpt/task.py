@@ -272,7 +272,9 @@ def task_stop_insepct(
                 sys.setprofile(original_profiler)
                 return
             if thread in task.blocking_threads:
-                raise RuntimeError("profile blocking threads")
+                assert thread in profiled
+                sys.setprofile(original_profiler)
+                return
 
             if is_checkpoint_safe(frame):
                 frames[thread] = (frame, CaptureEvent(event))
@@ -299,6 +301,7 @@ def task_stop_insepct(
                 for thread in task.blocking_threads
             )
         )
+        profiled |= task.blocking_threads
         ret = inspector(frames)
     finally:
         barrier.notify_leave()

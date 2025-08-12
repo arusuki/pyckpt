@@ -2,7 +2,6 @@ from .frame import (
     EvaluateResult,
     ExceptionStates,
     NullObject,
-    eval_frame_at_lasti,
     get_generator,
     restore_thread_state,
     save_thread_state,
@@ -10,9 +9,6 @@ from .frame import (
     snapshot_frame,
     eval_frame,
     set_profile_all_threads,
-    snapshot,
-    cframe_id,
-    cframe_backtrace,
     frame_lasti_opcode,
 )
 from .generator import (
@@ -24,7 +20,6 @@ from .generator import (
     resume_generator,
     setup_generator,
     snapshot_generator,
-    snapshot_generator_frame,
     snapshot_frame_generator,
     generator_push_stack,
     generator_set_instr_offset,
@@ -34,14 +29,12 @@ from .generator import (
 
 __all__ = [
     "EvaluateResult",
-    "eval_frame_at_lasti",
     "ExceptionStates",
     "restore_thread_state",
     "save_thread_state",
     "set_profile",
     "snapshot_frame",
     "eval_frame",
-    "snapshot",
     "get_generator",
     "get_generator_type",
     "make_generator",
@@ -50,7 +43,6 @@ __all__ = [
     "is_suspended",
     "is_executing",
     "resume_generator",
-    "snapshot_generator_frame",
     "make_new_generator",
     "setup_generator",
     "set_profile_all_threads",
@@ -59,7 +51,5 @@ __all__ = [
     "generator_set_instr_offset",
     "generator_resume",
     "generator_shrink_stack",
-    "cframe_id",
-    "cframe_backtrace",
     "frame_lasti_opcode",
 ]

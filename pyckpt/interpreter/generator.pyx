@@ -10,7 +10,7 @@ from pyckpt.interpreter.cpython cimport (
     _Py_CODEUNIT,
     _PyEval_EvalFrameDefault,
 )
-from pyckpt.interpreter.frame cimport init_locals_and_stack, _snapshot_frame, _do_snapshot_frame
+from pyckpt.interpreter.frame cimport init_locals_and_stack, _do_snapshot_frame
 from pyckpt.interpreter.frame import NullObject, fetch_exception, restore_exception, EvaluateResult
 
 from pyckpt.util import BytecodeParseError
@@ -107,17 +107,6 @@ def snapshot_generator(generator: Generator):
         "exception": exception,
     }
 
-cpdef snapshot_generator_frame(object generator, object analyzer):
-    cdef PyGenObject* gen = <PyGenObject*> generator
-    try:
-        if gen.gi_frame_state != get_frame_suspended() \
-            and gen.gi_frame_state != get_frame_executing():
-            raise ValueError("snapshot non-(suspended|executing) generator is not supported")
-        return _snapshot_frame(gen.gi_iframe, False, analyzer)
-    except BytecodeParseError as e:
-        Py_INCREF(<object> gen.gi_code)
-        e.pos().code = <object> gen.gi_code
-        raise e
 
 cpdef snapshot_frame_generator(object generator, int stack_size = -1):
     cdef PyGenObject* gen = <PyGenObject*> generator

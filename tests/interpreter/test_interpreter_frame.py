@@ -161,19 +161,6 @@ def test_snapshot_generator_from_frame():
     assert isinstance(g, Generator)
     assert gen is g
 
-def test_current_cframe_id():
-    
-    def foo(cframe_id):
-        current = _frame.cframe_id()
-        assert cframe_id == current
-        bar(current)
-
-    def bar(cframe_id):
-        current = _frame.cframe_id()
-        assert cframe_id == current
-    
-    foo(_frame.cframe_id())
-
 
 def test_frame_lasti_opcode():
 
