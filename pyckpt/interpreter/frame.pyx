@@ -48,6 +48,8 @@ cdef extern from "Python.h":
     cdef void PyThread_release_lock(PyThread_type_lock lock)
     cdef int _PyEval_SetProfile(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
     cdef int _PyEval_SetTrace(PyThreadState *tstate, Py_tracefunc func, PyObject *arg)
+    cdef PyObject *PyCode_GetCode(PyCodeObject *co)
+    cdef char *PyBytes_AS_STRING(PyObject *string)
 
 
 if (3, 11) <= sys.version_info <= (3, 12):
@@ -155,87 +157,6 @@ class EvaluateResult(NamedTuple):
     exception_states: Optional[ExceptionStates]
 
 
-def eval_frame_at_lasti(
-    func_obj: FunctionType,
-    nlocals: List[Any],
-    stack: List[Any],
-    is_leaf: bool,
-    is_return: bool = False,
-    ret_value: Any = None,
-    prev_instr_offset = -1,
-    exc_states: Optional[ExceptionStates] = None,
-) -> EvaluateResult:
-    cdef PyFunctionObject* func = <PyFunctionObject*>func_obj
-    cdef PyThreadState* state = PyThreadState_GET()
-    cdef PyCodeObject * code = <PyCodeObject*> func.func_code;
-    cdef size_t size = code.co_nlocalsplus + code.co_stacksize + frame_specials_size();
-    cdef _PyInterpreterFrame *frame = <_PyInterpreterFrame*> malloc(sizeof(PyObject*) * size)
-
-    if not is_leaf and not is_return:
-        stack.append(ret_value)
-    _PyFrame_InitializeSpecials(
-        frame,
-        <PyFunctionObject*> func,
-        func.func_globals,
-        code.co_nlocalsplus
-    )
-    frame.prev_instr = &(<_Py_CODEUNIT*>(code.co_code_adaptive))[prev_instr_offset]
-    init_locals_and_stack(frame, nlocals, stack, code.co_nlocalsplus)
-    do_exc = 0
-    if exc_states is not None:
-        if PyErr_Occurred() != NULL:
-            _, exc_prev, _ = fetch_exception()
-            PyErr_Clear()
-            raise RuntimeError("eval a frame when exception has been raised")\
-                from exc_prev
-        restore_exception(exc_states)
-        do_exc = 1
-    cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
-    free(frame)
-    if result == NULL:
-        exc_states = fetch_exception()
-        return EvaluateResult(NullObject, exc_states)
-    return EvaluateResult(<object> result, None)
-
-def _offset_without_cache(
-    code_array: List[dis.Instruction],
-    offset_with_cache: int,
-) -> int:
-    CACHE = dis.opmap['CACHE']
-    if offset_with_cache < 0:
-        return offset_with_cache
-    return sum(1 for c in code_array[:offset_with_cache] if c.opcode != CACHE)
-
-
-# FIXME: these version-dependent functions should be placed separately.
-CALL_INSTR_NAMES = ['CALL', 'CALL_FUNCTION_EX', 'YIELD_VALUE', 'RETURN_VALUE']
-CALL_CODES = [dis.opmap[name] for name in CALL_INSTR_NAMES]
-def is_call_instr(opcode: int):
-    return opcode in CALL_CODES
-
-
-def _fix_non_leaf_call(code_array: List[dis.Instruction], instr_offset):
-    """
-    Before CPython 3.11, python-python call is not "inlined"
-    Hence we need to manually move instr_offset back to the 'CALL' instruction
-    """
-    CACHE = dis.opmap['CACHE']
-    instr = code_array[instr_offset]
-    if instr.opcode == CACHE:
-        current = instr_offset - 1
-        while code_array[current].opcode == CACHE:
-            current -= 1
-        instr_offset = current
-    if not is_call_instr(code_array[instr_offset].opcode):
-        raise BytecodeParseError(
-            CodePosition(
-                None,
-                instr_offset,
-                f"Invalid op {code_array[instr_offset]} at offset: {instr_offset}"
-            ),
-        )
-    return instr_offset
-
 cdef int _check_generator(_PyInterpreterFrame* frame):
     cdef PyCodeObject* code = <PyCodeObject*> frame.f_func.func_code
     cdef int co_flags = code.co_flags
@@ -256,85 +177,6 @@ def get_generator(frame: FrameType):
     gen = <object> generator_of(_frame)
     Py_INCREF(gen)
     return <object> gen
-
-PyCapsule = Any
-cdef object _snapshot_frame(void* frame_ptr, int is_leaf, object analyzer):
-    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> frame_ptr
-    if frame == NULL:
-        raise RuntimeError("fail: PyCapsule_GetPointer")
-    cdef PyFunctionObject* func = <PyFunctionObject*>(frame.f_func)
-    cdef PyCodeObject* code = <PyCodeObject*> func.func_code
-    cdef int nlocalsplus = code.co_nlocalsplus
-    cdef _Py_CODEUNIT* code_start = <_Py_CODEUNIT*> code.co_code_adaptive
-
-    instr_offset = frame.prev_instr - code_start
-    assert instr_offset >= -1 and instr_offset < Py_SIZE(<PyObject*> code)
-    code_array = list(dis.get_instructions(<object> code, show_caches=True))
-    fixed_instr_offset = instr_offset
-    if not is_leaf:
-        fixed_instr_offset = _fix_non_leaf_call(
-            code_array,
-            instr_offset
-        )
-
-    is_return = False
-    if code_array[instr_offset].opcode == dis.opmap["RETURN_VALUE"]:
-        instr_offset -= 1
-        is_return = True
-
-    CALL = dis.opmap["CALL"]
-
-    orig_instr = instr_offset
-    if code_array[instr_offset].opcode == CALL:
-        instr_offset += bytecode.ConcreteInstr("CALL", 0).use_cache_opcodes()
-
-    is_generator = _check_generator(frame)
-    stacksize = analyzer(
-        <object> func,
-        _offset_without_cache(code_array, fixed_instr_offset),
-        is_generator > 0,
-    )
-    # Ignore the 'return value' of the ongoing 'CALL' instruction.
-    if not is_leaf:
-        stacksize -= 1
-    elif is_return:
-        stacksize += 1 # snapshot the return value
-
-    generator: Optional[Generator] = None
-    if is_generator > 0:
-        generator = <object> generator_of(frame)
-        Py_INCREF(generator)
-
-    captured = {
-        "func": <object> func,
-        "nlocals": [
-            <object> frame.localsplus[i]
-                if frame.localsplus[i] != NULL else NullObject
-            for i in range(nlocalsplus)
-        ],
-        "stack": [
-            <object> frame.localsplus[nlocalsplus + i]
-                if frame.localsplus[nlocalsplus + i] != NULL else NullObject
-            for i in range(stacksize)
-        ],
-        "prev_instr_offset": instr_offset,
-        "is_leaf": is_leaf,
-        "is_return": is_return,
-    }
-    for obj in chain(captured["nlocals"], captured["stack"]):
-        Py_INCREF(obj)
-    Py_INCREF(<object> func)
-    Py_INCREF(generator)
-    return captured
-
-def snapshot(frame_obj: FrameType, is_leaf: bool, analyzer: Analyzer) -> Dict:
-    cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*>frame_obj)
-    try:
-        return _snapshot_frame(_frame, <int> is_leaf, analyzer)
-    except BytecodeParseError as e:
-        Py_INCREF(<object> frame_obj.f_code)
-        e.pos().code = <object> frame_obj.f_code
-        raise e
 
 
 def save_thread_state(thread: Thread):
@@ -398,3 +240,95 @@ def set_profile_all_threads(func: Optional[FunctionType]):
     while tstate != NULL:
         _PyEval_SetProfile(tstate, trace_trampoline, <PyObject*> func)
         tstate = PyThreadState_Next(tstate)
+
+cdef object _do_snapshot_frame(void* frame_ptr, int stack_size_hint):
+    cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> frame_ptr
+    cdef PyFunctionObject* func = <PyFunctionObject*>(frame.f_func)
+    cdef PyCodeObject* code = <PyCodeObject*> func.func_code
+    cdef int nlocalsplus = code.co_nlocalsplus
+    cdef _Py_CODEUNIT* code_start = <_Py_CODEUNIT*> code.co_code_adaptive
+    cdef int stack_size = stack_size_hint
+    if stack_size < 0:
+        stack_size = frame.stacktop
+    elif frame.stacktop >= 0 and stack_size > frame.stacktop:
+        raise ValueError(f"invalid stack size hint: {stack_size_hint}, actual size: {frame.stacktop}") 
+    if stack_size < 0:
+        raise ValueError("require a hint for stack size")
+
+    CALL = dis.opmap["CALL"]
+    instr_offset = frame.prev_instr - code_start
+
+    captured = {
+        "func": <object> func,
+        "nlocals": [
+            <object> frame.localsplus[i]
+                if frame.localsplus[i] != NULL else NullObject
+            for i in range(nlocalsplus)
+        ],
+        "stack": [
+            <object> frame.localsplus[nlocalsplus + i]
+                if frame.localsplus[nlocalsplus + i] != NULL else NullObject
+            for i in range(stack_size)
+        ],
+        "instr_offset": instr_offset,
+    }
+    for obj in chain(captured["nlocals"], captured["stack"]):
+        Py_INCREF(obj)
+    Py_INCREF(<object> func)
+    return captured
+
+def snapshot_frame(frame: FrameType, stack_size_hint: int = -1):
+    cdef _PyInterpreterFrame* _frame = GET_FRAME(<PyFrameObject*>frame)
+    return _do_snapshot_frame(_frame, stack_size_hint)
+
+def eval_frame(
+    func: FunctionType,
+    nlocals: List[Any],
+    stack: List[Any],
+    instr_offset: int, 
+    exc_states: Optional[ExceptionStates] = None,
+) -> EvaluateResult:
+    cdef PyFunctionObject* func_obj = <PyFunctionObject*>func
+    cdef PyThreadState* state = PyThreadState_GET()
+    cdef PyCodeObject * code = <PyCodeObject*> func_obj.func_code;
+    cdef size_t size = code.co_nlocalsplus + code.co_stacksize + frame_specials_size();
+    cdef _PyInterpreterFrame *frame = <_PyInterpreterFrame*> malloc(sizeof(PyObject*) * size)
+
+    _PyFrame_InitializeSpecials(
+        frame,
+        <PyFunctionObject*> func_obj,
+        func_obj.func_globals,
+        code.co_nlocalsplus
+    )
+    frame.prev_instr = &(<_Py_CODEUNIT*>(code.co_code_adaptive))[instr_offset]
+    init_locals_and_stack(frame, nlocals, stack, code.co_nlocalsplus)
+    do_exc = 0
+    if exc_states is not None:
+        if PyErr_Occurred() != NULL:
+            _, exc_prev, _ = fetch_exception()
+            PyErr_Clear()
+            raise RuntimeError("eval a frame when exception has been raised")\
+                from exc_prev
+        restore_exception(exc_states)
+        do_exc = 1
+    cdef PyObject* result = _PyEval_EvalFrameDefault(state, frame, do_exc)
+    free(frame)
+    if result == NULL:
+        exc_states = fetch_exception()
+        return EvaluateResult(NullObject, exc_states)
+    return EvaluateResult(<object> result, None)
+
+
+cpdef int frame_lasti_opcode(object frame):
+    cdef PyCodeObject* code = <PyCodeObject*> frame.f_code
+    cdef PyObject* code_bytes = PyCode_GetCode(code)
+    cdef unsigned char* codes = <unsigned char*> PyBytes_AS_STRING(code_bytes)
+    cdef int last_i = frame.f_lasti
+    if last_i < 0:
+        return 0
+    assert sizeof(_Py_CODEUNIT) == 2
+    while codes[last_i] == 0:
+        last_i -= sizeof(_Py_CODEUNIT)
+        if last_i < 0:
+            return 0
+    return codes[last_i]

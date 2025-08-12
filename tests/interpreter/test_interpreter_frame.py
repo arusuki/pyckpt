@@ -1,41 +1,33 @@
-# pylint: disable=C0104,W0212,R0903
 import dis
 import inspect
-from types import FrameType
+from types import CodeType, FrameType
 from typing import Generator, Optional
 
 import pytest
 from bytecode import Bytecode, Instr
 
-from pyckpt.interpreter import NullObject, EvaluateResult
+from pyckpt.interpreter import EvaluateResult, NullObject
 from pyckpt.interpreter import frame as _frame
 
 
-def test_eval_no_args():
+def test_eval_frame_no_args(capsys):
     def foo():
-        print("hello, world")
+        print("hello")
 
-    _frame.eval_frame_at_lasti(
-        foo,
-        [],
-        [],
-        True,
-    )
+    _frame.eval_frame(foo, [], [], -1)
+    result = capsys.readouterr()
+    assert result.out.count("hello") == 1
 
 
-def test_eval_one_arg():
+def test_eval_frame_one_arg(capsys):
     def foo(arg1):
-        print(f"hello: {arg1}")
+        print(f"hello {arg1}")
 
-    _frame.eval_frame_at_lasti(
-        foo,
-        ["world"],
-        [],
-        True,
-    )
+    _frame.eval_frame(foo, ["world"], [], -1)
+    result = capsys.readouterr()
+    assert result.out.count("hello world") == 1
 
-
-def test_eval_return():
+def test_eval_frame_return():
     def foo():
         return "41"
 
@@ -46,53 +38,68 @@ def test_eval_return():
         if i.opcode == RETURN_VALUE:
             offset = off
     assert offset
-    ret, exc = _frame.eval_frame_at_lasti(
-        foo, [], ["42"], True, is_return=True, prev_instr_offset=offset - 1
-    )
+    ret, exc = _frame.eval_frame(foo, [], ["42"], instr_offset=offset - 1)
     assert exc is None
     assert ret == "42"
 
 
-def test_raise_exception():
+def test_eval_frame_raise_exception():
     exc = RuntimeError("test raise exception")
 
     def test():
         raise exc
 
-    ret, exc_states = _frame.eval_frame_at_lasti(
+    ret, exc_states = _frame.eval_frame(
         test,
         [],
         [],
-        True,
+        -1,
     )
     assert ret is NullObject
     assert isinstance(exc_states, tuple)
     assert exc_states[1] is exc
 
 
-def test_return_add():
+def test_eval_frame_return_add():
     def add(lhs, rhs):
         return lhs + rhs
 
-    result, exc = _frame.eval_frame_at_lasti(
+    result, exc = _frame.eval_frame(
         add,
         [1, 2],
         [],
-        True,
+        -1,
     )
     assert exc is None
     assert isinstance(result, int) and result == 3, "invalid result"
 
 
-class FixedStackAnalyzer:
-    def __init__(self, stack_size: int):
-        self.stack_size = stack_size
+def test_eval_frame_traceback():
+    def foo():
+        raise RuntimeError("hello")
 
-    def __call__(self, *_unused_callable):
-        return self.stack_size
+    def bar():
+        pass
+
+    eval_result = _frame.eval_frame(foo, [], [], -1)
+    assert isinstance(eval_result, EvaluateResult)
+    ret, exc = eval_result
+    assert ret is NullObject
+    assert isinstance(exc, tuple)
+
+    eval_result = _frame.eval_frame(bar, [], [], -1, exc_states=exc)
+    assert isinstance(eval_result, EvaluateResult)
 
 
-def test_snapshot_stack():
+def test_restore_thread_states():
+    e = RuntimeError("test")
+    with pytest.raises(RuntimeError, match="test"):
+        _frame.restore_thread_state({"exception": e})
+        raise
+    _frame.restore_thread_state({"exception": None})
+
+
+def test_snapshot_frame_stack():
     def print_and_return_last(*args):
         print(*args)
         return args[-1]
@@ -104,7 +111,7 @@ def test_snapshot_stack():
         stack = print_and_return_last(
             arg1,
             arg2,
-            _frame.snapshot(frame, True, FixedStackAnalyzer(4))["stack"],
+            _frame.snapshot_frame(frame, 4)["stack"],
         )
 
         assert stack[0] is NullObject
@@ -113,21 +120,6 @@ def test_snapshot_stack():
         assert stack[3] is arg2
 
     foo()
-
-
-def test_snapshot_generator_from_frame():
-    def foo():
-        frame = inspect.currentframe()
-        yield frame
-
-    gen = foo()
-    assert isinstance(gen, Generator)
-
-    frame = next(gen)
-    assert isinstance(frame, FrameType)
-    g = _frame.get_generator(frame)
-    assert isinstance(g, Generator)
-    assert gen is g
 
 
 def test_offset_without_cache():
@@ -155,28 +147,29 @@ def test_offset_without_cache():
             instr_counter += 1
 
 
-def test_reraise():
-    e = RuntimeError("test")
-    with pytest.raises(RuntimeError, match="test"):
-        _frame.restore_thread_state({"exception": e})
-        raise
-    _frame.restore_thread_state({"exception": None})
-
-def test_eval_traceback():
-    
+def test_snapshot_generator_from_frame():
     def foo():
-        raise RuntimeError("hello")
+        frame = inspect.currentframe()
+        yield frame
+
+    gen = foo()
+    assert isinstance(gen, Generator)
+
+    frame = next(gen)
+    assert isinstance(frame, FrameType)
+    g = _frame.get_generator(frame)
+    assert isinstance(g, Generator)
+    assert gen is g
+
+
+def test_frame_lasti_opcode():
+
+    def foo():
+        bar()
 
     def bar():
-        pass
+        frame = inspect.currentframe().f_back
+        opcode = _frame.frame_lasti_opcode(frame)
+        assert opcode == dis.opmap["CALL"]
 
-    eval_result = _frame.eval_frame_at_lasti(foo, [], [], True)
-    assert isinstance(eval_result, EvaluateResult)
-    ret, exc = eval_result
-    assert ret is NullObject
-    assert isinstance(exc, tuple)
-
-    eval_result = _frame.eval_frame_at_lasti(bar, [], [], True, exc_states=exc)
-    assert isinstance(eval_result, EvaluateResult)
-
-    print(eval_result[1])
+    foo()

@@ -1,6 +1,7 @@
 import inspect
+import io
 import os
-from typing import Callable, ParamSpec
+from typing import Any, Callable, ParamSpec, TypeVar
 import random
 import dill
 import numpy as np
@@ -15,6 +16,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine.core import EngineCore
 
+from pyckpt.objects import PersistedObjects, Pickler, Unpickler
+
 
 def print_attrs(obj):
     """get objects that fail to pickle"""
@@ -27,11 +30,15 @@ def print_attrs(obj):
                 continue
             print("attr: ", attr)
 
+
 _P = ParamSpec("_P")
+
 
 class _TERMINATE: ...
 
+
 TERMINATE = _TERMINATE()
+
 
 def _process_func(func: Callable[_P, None], args: tuple, kwargs: dict):
     try:
@@ -42,35 +49,45 @@ def _process_func(func: Callable[_P, None], args: tuple, kwargs: dict):
             if isinstance(maybe_queue, queue_type):
                 maybe_queue.put(TERMINATE)
         import traceback
+
         traceback.print_exc()
         os._exit(1)
 
+
 def make_queue() -> Queue:
-    ctx = multiprocessing.get_context("spawn") 
+    ctx = multiprocessing.get_context("spawn")
     return ctx.Queue()
 
-def run_spawned(func: Callable[_P, None], *args: _P.args, **kwargs: _P.kwargs) -> Process:
-    ctx = multiprocessing.get_context("spawn") 
+
+def run_spawned(
+    func: Callable[_P, None], *args: _P.args, **kwargs: _P.kwargs
+) -> Process:
+    ctx = multiprocessing.get_context("spawn")
     p = ctx.Process(target=_process_func, args=(func, args, kwargs))
     p.start()
     return p
 
+
 def save_random_states() -> bytes:
     states = {
-        'python_random': random.getstate(),
-        'numpy': np.random.get_state(),
-        'torch': torch.get_rng_state(),
-        'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        "python_random": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all()
+        if torch.cuda.is_available()
+        else None,
     }
     return dill.dumps(states)
 
+
 def restore_random_states(states_data: bytes):
     states = dill.loads(states_data)
-    random.setstate(states['python_random'])
-    np.random.set_state(states['numpy'])
-    torch.set_rng_state(states['torch'])
-    if torch.cuda.is_available() and states['torch_cuda'] is not None:
-        torch.cuda.set_rng_state_all(states['torch_cuda'])
+    random.setstate(states["python_random"])
+    np.random.set_state(states["numpy"])
+    torch.set_rng_state(states["torch"])
+    if torch.cuda.is_available() and states["torch_cuda"] is not None:
+        torch.cuda.set_rng_state_all(states["torch_cuda"])
+
 
 def print_cache_tensor(core: EngineCore):
     manager = core.scheduler.kv_cache_manager
@@ -82,6 +99,25 @@ def print_cache_tensor(core: EngineCore):
     print("num_cached", full_attn_manager.num_cached_block)
 
     for req in core.scheduler.requests:
-        print(
-            "blocks: ", manager.coordinator.get_blocks(req)
-        )
+        print("blocks: ", manager.coordinator.get_blocks(req))
+
+
+def dump(file, cocoon) -> PersistedObjects:
+    pickler = Pickler(file)
+    pickler.dump(cocoon)
+    return dill.copy(pickler.consume_persisted())
+
+
+def load(file, persisted: PersistedObjects):
+    unpickler = Unpickler(file, persisted)
+    return unpickler.load(), unpickler.get_loaded_objects()
+
+
+T = TypeVar("T")
+
+
+def copy(cocoon: T) -> tuple[T, dict[int, Any]]:
+    buffer = io.BytesIO()
+    persist = dill.copy(dump(buffer, cocoon))
+    buffer.seek(0)
+    return load(buffer, persist)
