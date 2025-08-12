@@ -8,7 +8,7 @@ import py
 import pytest
 
 import pyckpt.task as task
-from pyckpt.frame import CaptureEvent, FunctionFrame
+from pyckpt.frame import FunctionFrame
 from pyckpt.task import (
     Barrier,
     CapturedThreads,
@@ -187,11 +187,20 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
 
     free_port = find_free_port()
 
+    def another_task():
+        while not lock.acquire(blocking=False):
+            pass
+        lock.release()
+
+
     @main(f"localhost:{free_port}")
     def task_function():
+        another = Thread(target=another_task)
+        another.start()
         start_event.set()
         while not lock.acquire(blocking=False):
             pass
+        lock.release()
 
     server = Thread(target=task_function)
     server.start()
@@ -216,7 +225,7 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
 
     loaded_checkpoint = load_checkpoint(str(tmpdir), filename)
     saved, _, _ = loaded_checkpoint
-    assert len(saved) == 1
+    assert len(saved) == 2
     thread = next(iter(saved.values()))
     assert isinstance(thread, TaskThread)
     find_frame = False

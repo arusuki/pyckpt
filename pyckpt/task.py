@@ -8,8 +8,8 @@ from _thread import LockType as LockType
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
-from io import BytesIO, StringIO
-from threading import Thread, _active
+from io import StringIO
+from threading import Thread, _active, current_thread
 from types import FrameType
 from typing import Any, Callable, NamedTuple, Optional, ParamSpec, TypeVar, cast
 from urllib.parse import urlparse
@@ -19,7 +19,7 @@ import msgpackrpc as rpc
 from dill import Pickler as DataPickler
 from dill import Unpickler as DataUnpickler
 
-from pyckpt.frame import CALL_CODES, CaptureEvent, Frame, FunctionFrame, snapshot_frame
+from pyckpt.frame import CALL_CODES, CaptureEvent, Frame, snapshot_frame
 from pyckpt.interpreter import frame_lasti_opcode, set_profile_all_threads
 from pyckpt.objects import PersistedObjects, Pickler, Unpickler, register_builtin
 
@@ -94,6 +94,7 @@ class Task:
         self._daemon = Thread(
             target=self._run_daemon,
             args=(rpc.Address(hostname, port),),
+            _disable_patch = True,
         )
         self._daemon.start()
 
@@ -169,17 +170,18 @@ def main(address="localhost:9387", wait_shutdown=True):
         @wraps(func)
         def _main(*args: P.args, **kwargs: P.kwargs) -> T:
             try:
-                with _patch_locks():
+                with _patch_builtin():
                     init_task(func.__name__, address)
                     get_task().register_current_thread()
                     return __mark_main(func, *args, **kwargs)
             except Exception as e:
                 # panic
+                traceback.print_exception(e)
                 logger.fatal("exception thorwn out of main function: %s", e)
                 exit(-1)
             finally:
                 if _task:
-                    _task.threads.remove(threading.current_thread())
+                    _task.threads.discard(threading.current_thread())
                     shutdown_task(wait_shutdown)
 
         return cast(Callable[P, T], _main)
@@ -339,44 +341,7 @@ def task_checkpoint(
             )
         excepthook = sys.excepthook
         sys.excepthook = sys.__excepthook__
-
-        try:
-            checkpoint.dump(saved_task)
-        except Exception as e:
-            print(f"ok, start checking..., first read the exception: {e}")
-            current = None
-            try:
-                print(f"how many threads do you have?: {len(saved_task)}")
-                frames = next(iter(saved_task.values())).frames
-                i = 0
-                try:
-                    print("ok, let's find out...")
-                    newp = Pickler(BytesIO())
-                    frame = frames[0]
-                    try:
-                        assert isinstance(frame, FunctionFrame)
-                        try:
-                            # frame.states = frame.states._replace(nlocals=None)
-                            stack = frame.states.stack
-                            print(f"ok, the stack is {stack}")
-                            print(
-                                f"{id(stack[1]), id(_original_lock_acquire), id(_lock_acquire)}"
-                            )
-                            stack[1] = None
-                            print(f"after modifying: {stack}")
-                            frame.states = frame.states._replace(stack=stack)
-                        except Exception as e:
-                            print(f"so careless :( , this is a stupid error: {e}")
-                        newp.dump(frame)
-                        print("cool, it doesn't break this time")
-                    except Exception:
-                        print("ok...?")
-                except Exception:
-                    print(f"error at {i}, frame: {current}")
-            except Exception:
-                print(f"error checkpoint {current}")
-            raise
-
+        checkpoint.dump(saved_task)
         persisted_objects = checkpoint.consume_persisted()
         data.dump(persisted_objects)
         sys.excepthook = excepthook
@@ -406,13 +371,23 @@ def _lock_acquire(self, blocking: bool = True, timeout: float = -1):
     return ret
 
 
+
 @contextmanager
-def _patch_locks():
+def _patch_builtin():
+    _orignial_init = threading.Thread.__init__
+    def patched_init(self, *args, **kwargs):
+        _disable_patch = kwargs.pop("_disable_patch", False)
+        _orignial_init(self, *args, **kwargs)
+        if not _disable_patch:
+            get_task().threads.add(self)
+
     patch.curse(LockType, "acquire", _lock_acquire)
+    threading.Thread.__init__ = patched_init
     try:
         yield
     finally:
         patch.curse(LockType, "acquire", _original_lock_acquire)
+        Thread.__init__ = _orignial_init
 
 
 class LoadedCheckpoint(NamedTuple):
@@ -490,6 +465,10 @@ def resume_checkpoint(
 
     @main(address=address, wait_shutdown=wait_shutdown)
     def _resume():
+        for worker in workers:
+            get_task().threads.add(worker)
+            get_task().threads.discard(current_thread())
+
         for worker in workers:
             worker.start()
 
