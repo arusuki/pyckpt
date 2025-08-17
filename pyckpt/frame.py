@@ -99,6 +99,9 @@ class FunctionFrame(Frame):
         self.states = states
         self._override_instr_offset: Optional[int] = None
 
+    def __str__(self):
+        return "FunctionFrame: " + str(self.states)
+
     def _set_instr_offset(self, instr_offset: int):
         if not self.states:
             raise ValueError("invliad fuction frame")

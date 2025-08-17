@@ -226,7 +226,7 @@ def set_profile(func: Optional[FunctionType]):
 
 def set_profile_all_threads(func: Optional[FunctionType]):
     if not func:
-        PyEval_SetProfile(NULL, NULL)
+        raise ValueError("set None profile function is not supported")
         return
     cdef _PyRuntimeState* runtime = <_PyRuntimeState*> get_python_py_runtime()
     cdef PyThreadState* tstate
@@ -240,6 +240,7 @@ def set_profile_all_threads(func: Optional[FunctionType]):
     while tstate != NULL:
         _PyEval_SetProfile(tstate, trace_trampoline, <PyObject*> func)
         tstate = PyThreadState_Next(tstate)
+
 
 cdef object _do_snapshot_frame(void* frame_ptr, int stack_size_hint):
     cdef _PyInterpreterFrame* frame = <_PyInterpreterFrame*> frame_ptr

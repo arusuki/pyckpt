@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import sys
@@ -8,17 +9,25 @@ from _thread import LockType as LockType
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
-from io import StringIO
-from threading import Thread, _active, current_thread
+from io import BytesIO, StringIO
+from threading import Lock, Thread, _active, current_thread
 from types import FrameType
-from typing import Any, Callable, NamedTuple, Optional, ParamSpec, TypeVar, cast
+from typing import (
+    Any,
+    Callable,
+    NamedTuple,
+    Optional,
+    ParamSpec,
+    TypeVar,
+    cast,
+)
 from urllib.parse import urlparse
 
 import forbiddenfruit as patch
-import msgpackrpc as rpc
 from dill import Pickler as DataPickler
 from dill import Unpickler as DataUnpickler
 
+from pyckpt import rpc
 from pyckpt.frame import CALL_CODES, CaptureEvent, Frame, snapshot_frame
 from pyckpt.interpreter import frame_lasti_opcode, set_profile_all_threads
 from pyckpt.objects import PersistedObjects, Pickler, Unpickler, register_builtin
@@ -30,6 +39,14 @@ logger = logging.getLogger(__name__)
 
 _local = threading.local()
 _local._atomic = False
+
+
+class TaskProxy:
+    def __reduce__(self):
+        return TaskProxy, ()
+
+    def __getattr__(self, name: str):
+        return getattr(get_task(), name)
 
 
 @contextmanager
@@ -47,12 +64,12 @@ def is_atomic() -> bool:
 
 
 class TaskDaemon:
-    def echo(self, msg: str):
+    @staticmethod
+    def echo(msg: str):
         return msg
 
-    def checkpoint(
-        self, path: bytes, name: bytes, event_filter: Optional[list[CaptureEvent]]
-    ):
+    @staticmethod
+    def checkpoint(path: str, name: str, event_filter: Optional[list[CaptureEvent]]):
         try:
             filter = None
             if event_filter:
@@ -60,8 +77,8 @@ class TaskDaemon:
             checkpoint_file_base = os.path.join(path, name)
 
             with (
-                open(checkpoint_file_base + ".ckpt".encode(), "wb") as checkpoint_path,
-                open(checkpoint_file_base + ".data".encode(), "wb") as data_path,
+                open(checkpoint_file_base + ".ckpt", "wb") as checkpoint_path,
+                open(checkpoint_file_base + ".data", "wb") as data_path,
             ):
                 checkpoint = Pickler(checkpoint_path)
                 data = DataPickler(data_path)
@@ -71,7 +88,7 @@ class TaskDaemon:
             raise
 
 
-def parse_address(address):
+def parse_address(address) -> tuple[str, int]:
     if "://" not in address:
         address = "//" + address
     parsed = urlparse(address)
@@ -86,38 +103,25 @@ class Task:
         name: str,
         daemon_addr: str,
     ):
+        def _make_executor() -> ThreadPoolExecutor:
+            executor = ThreadPoolExecutor(max_workers=1)
+            # eagerly initialize the thread and wait for its start
+            # so it's not tracked by task
+            executor.submit(lambda: None).result()
+            return executor
+
         self.name = name
         self.threads: set[Thread] = set()
         self.blocking_threads: set[Thread] = set()
-        self._server = rpc.Server(TaskDaemon())
+        self._server = rpc.Server(TaskDaemon(), _make_executor())
         hostname, port = parse_address(daemon_addr)
-        self._daemon = Thread(
-            target=self._run_daemon,
-            args=(rpc.Address(hostname, port),),
-            _disable_patch = True,
-        )
-        self._daemon.start()
+        self._server.start(hostname, port)
 
-    def _run_daemon(self, address: rpc.Address):
-        logger.info("task daemon start listening on %s:%s", address.host, address.port)
-        self._server.listen(address)
-        self._server.start()
+    def __reduce__(self):
+        return TaskProxy, ()
 
     def _shutdown(self):
-        MAX_RETRY = 10
-        TIME_WAIT = 0.1
-
-        for _ in range(MAX_RETRY):
-            self._server.close()
-            self._server.stop()
-            time.sleep(TIME_WAIT)
-            self._daemon.join(timeout=TIME_WAIT)
-            if not self._daemon.is_alive():
-                return
-            TIME_WAIT *= 1.7
-
-        if self._daemon.is_alive():
-            raise RuntimeError("timeout close server")
+        self._server.stop()
 
     def register_current_thread(self):
         thread = threading.current_thread()
@@ -137,8 +141,8 @@ def generate_checkpoint_name():
 _task: Optional[Task] = None
 
 
-def get_task():
-    if _task is None:
+def get_task(maybe_none: bool = False):
+    if _task is None and not maybe_none:
         raise RuntimeError("task not set, use @main to launch a task")
     return _task
 
@@ -170,9 +174,11 @@ def main(address="localhost:9387", wait_shutdown=True):
         @wraps(func)
         def _main(*args: P.args, **kwargs: P.kwargs) -> T:
             try:
+                init_task(func.__name__, address)
                 with _patch_builtin():
-                    init_task(func.__name__, address)
-                    get_task().register_current_thread()
+                    task = get_task()
+                    task.register_current_thread()
+                    logger.debug("task threads before enter main: %s", task.threads)
                     return __mark_main(func, *args, **kwargs)
             except Exception as e:
                 # panic
@@ -181,8 +187,17 @@ def main(address="localhost:9387", wait_shutdown=True):
                 exit(-1)
             finally:
                 if _task:
-                    _task.threads.discard(threading.current_thread())
-                    shutdown_task(wait_shutdown)
+                    try:
+                        _task.threads.discard(threading.current_thread())
+                        shutdown_task(wait_shutdown)
+                        logger.info("task shutdown")
+                    except Exception as e:
+                        tb = StringIO()
+                        traceback.print_tb(e.__traceback__, file=tb)
+                        logger.error(
+                            f"exception in shutdown: {e}, traceback: {tb.getvalue()}"
+                        )
+                        exit(-1)
 
         return cast(Callable[P, T], _main)
 
@@ -245,14 +260,27 @@ def task_stop_insepct(
     if event_filter and len(event_filter) == 0:
         raise ValueError("empty event filter")
     task = get_task()
-    if threading.current_thread() in task.threads:
+    current = threading.current_thread()
+    if current in task.threads:
         raise RuntimeError("call `checkpoint_task()` in task threads")
     original_profiler = sys.getprofile()
     assert original_profiler is None
     num_threads = len(task.threads)
     barrier = Barrier(num_threads)
+    logger.debug("wait threads: %s", task.threads)
     frames: CapturedThreads = {}
     profiled: set[Thread] = set()
+    profiler_lock = Lock()
+
+    def set_profiler(func: Callable):
+        if current is threading.current_thread():
+            if profiler_lock.locked():
+                return
+        try:
+            _original_lock_acquire(profiler_lock)
+            sys.setprofile(func)
+        finally:
+            profiler_lock.release()
 
     def _profiler(frame: FrameType, event: int, _arg: Any):
         try:
@@ -266,14 +294,17 @@ def task_stop_insepct(
                 return
             if event_filter and event not in event_filter:
                 return
-            task = get_task()
+            task = get_task(maybe_none=True)
+            if task is None:
+                set_profiler(original_profiler)
+                return
             thread = threading.current_thread()
             if thread not in task.threads or thread in profiled:
-                sys.setprofile(original_profiler)
+                set_profiler(original_profiler)
                 return
             if thread in task.blocking_threads:
                 assert thread in profiled
-                sys.setprofile(original_profiler)
+                set_profiler(original_profiler)
                 return
 
             if is_checkpoint_safe(frame):
@@ -281,14 +312,21 @@ def task_stop_insepct(
                 with atomic():
                     barrier.wait(1, wait_arrive=False)
                 profiled.add(thread)
-                sys.setprofile(original_profiler)
+                set_profiler(original_profiler)
 
         except Exception as e:
             # panic
-            logger.fatal("profiler raise exception: %s", e)
+            tb = StringIO()
+            traceback.print_tb(e.__traceback__, file=tb)
+            logger.fatal(
+                "profiler<%s> raise exception: %s, %s", current_thread(), e, tb.getvalue()
+            )
             exit(-1)
 
+    _original_lock_acquire(profiler_lock)
     set_profile_all_threads(_profiler)
+    profiler_lock.release()
+
     num_finished = task.update_threads()
     num_blocking = len(task.blocking_threads)
     barrier.wait(num_finished + num_blocking, wait_arrive=True)
@@ -331,6 +369,15 @@ def capture_frame_backtrace(frame: FrameType, event: CaptureEvent) -> list[Frame
     return frames
 
 
+def _debug_checkpoint(saved_task: SavedTask):
+    for current in saved_task.values():
+        for frame in current.frames:
+            try:
+                Pickler(BytesIO()).dump(frame)
+            except Exception as e:
+                logger.debug("error dumping frame: %s, exception: %s", frame, e)
+
+
 def task_checkpoint(
     checkpoint: Pickler,
     data: DataPickler,
@@ -344,7 +391,11 @@ def task_checkpoint(
             )
         excepthook = sys.excepthook
         sys.excepthook = sys.__excepthook__
-        checkpoint.dump(saved_task)
+        try:
+            checkpoint.dump(saved_task)
+        except Exception:
+            _debug_checkpoint(saved_task)
+            raise
         persisted_objects = checkpoint.consume_persisted()
         data.dump(persisted_objects)
         sys.excepthook = excepthook
@@ -374,11 +425,14 @@ def _lock_acquire(self, blocking: bool = True, timeout: float = -1):
     return ret
 
 
-
 @contextmanager
 def _patch_builtin():
     _orignial_init = threading.Thread.__init__
+
     def patched_init(self, *args, **kwargs):
+        task = get_task()
+        if current_thread() not in task.threads:
+            return _orignial_init(self, *args, **kwargs)
         _disable_patch = kwargs.pop("_disable_patch", False)
         _orignial_init(self, *args, **kwargs)
         if not _disable_patch:

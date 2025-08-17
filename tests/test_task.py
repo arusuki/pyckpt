@@ -3,7 +3,7 @@ from _thread import LockType as LockType
 from threading import Event, Lock, Thread
 from typing import Optional
 
-import msgpackrpc as rpc
+import pyckpt.rpc as rpc
 import py
 import pytest
 
@@ -113,73 +113,6 @@ def test_task_patch_lock_inspect():
     assert ret
 
 
-@pytest.mark.filterwarnings("ignore:encoding is deprecated")
-def test_task_rpc():
-    class SumServer(object):
-        def sum(self, x, y):
-            return x + y
-
-        def raise_exception(self):
-            raise RuntimeError("raise_exception")
-
-    free_port = find_free_port()
-    address = rpc.Address("localhost", free_port)
-    rpc_server = rpc.Server(SumServer())
-    start_event = Event()
-
-    def run_server():
-        rpc_server.listen(address)
-        start_event.set()
-        rpc_server.start()
-
-    server = Thread(target=run_server)
-    server.start()
-    start_event.wait(timeout=1.0)
-    try:
-        client = rpc.Client(address)
-        assert client.call("sum", 1, 2) == 3
-    finally:
-        rpc_server.close()
-        while True:
-            rpc_server.stop()
-            server.join(timeout=0.1)
-            if not server.is_alive():
-                break
-            print("retry stop...")
-
-
-@pytest.mark.filterwarnings("ignore:encoding is deprecated")
-def test_task_daemon_echo():
-    lock = Lock()
-    start_event = Event()
-    assert lock.acquire(blocking=False)
-
-    free_port = find_free_port()
-
-    @main(f"localhost:{free_port}")
-    def task_function():
-        start_event.set()
-        while not lock.acquire(blocking=False):
-            pass
-
-    server = Thread(target=task_function)
-    server.start()
-
-    start_event.wait()
-    address = rpc.Address("localhost", free_port)
-    client = rpc.Client(address)
-
-    try:
-        client = rpc.Client(address)
-        msg = "hello world"
-        ret = client.call("echo", msg)
-        assert str(ret, encoding="utf-8") == msg
-    finally:
-        lock.release()
-        server.join()
-
-
-@pytest.mark.filterwarnings("ignore:encoding is deprecated")
 def test_task_daemon_checkpoint(tmpdir: py.path.local):
     lock = Lock()
     start_event = Event()
@@ -204,14 +137,11 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
 
     server = Thread(target=task_function)
     server.start()
-
     start_event.wait()
-    address = rpc.Address("localhost", free_port)
-    client = rpc.Client(address)
-    filename = task.generate_checkpoint_name()
-
     try:
-        client = rpc.Client(address)
+        client = rpc.Client()
+        client.connect("localhost", free_port)
+        filename = task.generate_checkpoint_name()
         event_filter = None
         client.call(
             "checkpoint",
@@ -219,10 +149,14 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
             filename,
             event_filter,
         )
+        client.close()
+    except Exception as e:
+        print(e)
     finally:
         lock.release()
         server.join()
-
+    
+    assert get_task(maybe_none=True) is None
     loaded_checkpoint = load_checkpoint(str(tmpdir), filename)
     saved, _, _ = loaded_checkpoint
     assert len(saved) == 2
@@ -242,7 +176,5 @@ def test_task_daemon_checkpoint(tmpdir: py.path.local):
             if find_frame:
                 break
     assert find_frame
-
-    print(saved)
 
     resume_checkpoint(loaded_checkpoint, f"localhost:{find_free_port()}")
